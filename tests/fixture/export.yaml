@@ -6,6 +6,7 @@ targets:
   - Fixture.main
   - Fixture.uses_secret
   - Fixture.rooted
+  - Fixture.category_use
 copyright: 2026 Pierre Senellart
 manifest:
   title: "lax-export fixture"

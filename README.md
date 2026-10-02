@@ -189,8 +189,12 @@ axioms of the targets, and exits non-zero when a target rests on more than
    lemma that tactics use without leaving a trace in proof terms (`@[simp]`
    lemmas proved by `rfl`, coercion instances) and it still elaborates.
    Modules declaring syntax, macros or elaborators are vendored in full and
-   their declarations fed back as targets, to a fixed point. A scaffolding
-   command mentioning an unselected library constant is dropped.
+   their declarations fed back as targets, to a fixed point; a module
+   declaring a syntax category is the exception, since the category's
+   constant cannot carry the prefix: its parsers are dropped and every use
+   of its notation is expanded in place, from the macro expansions Lean
+   recorded, to the term it stands for. A scaffolding command mentioning an
+   unselected library constant is dropped.
 4. **Rename.** The library's namespace moves under `LaxNProofs` by a
    whole-name rewrite. Constants the library declares in foreign namespaces
    (Mathlib's, say `FirstOrder.Language.sat`) are renamed usage by usage from
@@ -227,10 +231,12 @@ still catch a constant outside the prefix or an unexpected axiom.
 
 ## Known limits
 
-- Two kinds of constant land outside the package prefix and cannot be moved:
-  syntax categories (`Lean.Parser.Category.…`) and the congruence lemmas
-  `simp` generates for Mathlib functions (`….congr_simp`). Any submission
-  using those features produces them.
+- A syntax category the library declares can never carry the package prefix
+  (its constant is `Lean.Parser.Category.…`), so the tool expands every use
+  of notation involving it, and every other notation the declaring module
+  defines, into the term it stands for, driving macro expansion to a fixed
+  point, and drops that module's parsers. Notation defined by a term
+  elaborator rather than by macro rules cannot be expanded this way.
 - A `variable` of a section is lost across a jump namespace (expansion of a
   library-defined command, or a `deriving` clause on a foreign inductive)
   unless the section's scaffolding is replayed, which the tool does for

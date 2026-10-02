@@ -4,6 +4,7 @@ and check it the way the Lax archive will. Needs the fixture built
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -63,8 +64,9 @@ def submission(tmp_path_factory):
         f"/--\n---\nconclusion: Lax{ID}.Main.holds\n---\nFrom the vendored library.\n-/\n"
         f"theorem holds : 1 + 1 = 2 := by\n  have := Lax{ID}Proofs.Fixture.rooted\n  rfl\n\nend Lax{ID}Proofs\n")
     cache = tmp_path_factory.mktemp("cache")
-    run([sys.executable, os.path.join(ROOT, "lax_export.py"), os.path.join(FIXTURE, "export.yaml"),
-         "--out", str(out), "--cache", str(cache), "--no-environment-check"], ROOT)
+    r = run([sys.executable, os.path.join(ROOT, "lax_export.py"), os.path.join(FIXTURE, "export.yaml"),
+             "--out", str(out), "--cache", str(cache), "--no-environment-check"], ROOT)
+    (out / "export.log").write_text(r.stderr)
     return out
 
 
@@ -84,7 +86,8 @@ def test_slicing(submission):
     vend = submission / "proofs" / f"Lax{ID}Proofs" / "Fixture"
     written = sorted(os.path.relpath(f, vend) for f in glob.glob(str(vend / "**" / "*.lean"), recursive=True))
     assert "Extra.lean" not in written                                # imported, never reached
-    assert "Syntax.lean" in written and "Command.lean" in written     # notation modules, in full
+    assert "Command.lean" in written                                   # a notation module, in full
+    assert "Syntax.lean" not in written           # declares a category: its parsers are dropped, uses expanded
     basic = (vend / "Basic.lean").read_text()
     assert "unused_lemma" not in basic
     assert "instance : CoeFun" in basic and "theorem box_apply" in basic   # silent declarations kept
@@ -96,6 +99,21 @@ def test_slicing(submission):
     assert f"instance _root_.Lax{ID}Proofs.Foreign.Nat.instInhabitedFixtureColor" in foreign
     assert "def fixtureSeven : Nat :=" in foreign                      # the expanded command
     assert "mk_const fixtureSeven" not in foreign                    # the invocation is gone
+    main = (vend / "Main.lean").read_text()
+    assert "theorem category_use : ((2 : Nat) + (2 : Nat)) = 4" in main # the category use is expanded
+    assert "b n + (0 + 0) =" in main                                    # and the module's other macro
+
+
+def test_field_notation_goes_through_the_alias(submission):
+    """`n.fixtureDouble` in the target: the use stays as written, the alias
+    at the old name resolves it, and the report has nothing to flag."""
+    main = (submission / "proofs" / f"Lax{ID}Proofs" / "Fixture" / "Main.lean").read_text()
+    assert "n.fixtureDouble" in main
+    assert f"Lax{ID}Proofs.Foreign.Nat.fixtureDouble" not in main.split("import", 1)[0]
+    log = (submission / "export.log").read_text()
+    assert "not handled" not in log
+    aliased = int(re.search(r"(\d+) uses through aliases", log).group(1))
+    assert aliased >= 1
 
 
 def test_build_and_check(submission):
@@ -109,7 +127,8 @@ def test_build_and_check(submission):
         + glob.glob(os.path.join(FIXTURE, ".lake", "packages", "*", ".lake", "build", "lib", "lean")))))
     env = dict(os.environ, LEAN_PATH=lean_path)
     r = run(["lean", "--run", os.path.join(ROOT, "Check.lean"), f"Lax{ID}Proofs",
-             f"Lax{ID}Proofs.Fixture.main", f"Lax{ID}Proofs.Fixture.rooted", f"Lax{ID}Proofs.holds"],
+             f"Lax{ID}Proofs.Fixture.main", f"Lax{ID}Proofs.Fixture.rooted",
+             f"Lax{ID}Proofs.Fixture.category_use", f"Lax{ID}Proofs.holds"],
             str(submission / "proofs"), env)
     assert "outside prefix: 0" in r.stdout, r.stdout
     assert "[propext, Classical.choice, Quot.sound]" in r.stdout or "[]" in r.stdout

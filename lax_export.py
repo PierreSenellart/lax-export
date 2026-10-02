@@ -529,10 +529,21 @@ def main():
             stack.extend(imports_of(m))
         return seen
 
-    def list_commands(mod):
+    def categories_of(mod):
+        """The syntax categories a module declares: they can never carry the
+        package prefix, so uses of them are expanded and their parsers dropped."""
+        path = module_path(args.src, mod)
+        if not os.path.isfile(path):
+            return []
+        return re.findall(r"^\s*declare_syntax_cat\s+([\w.']+)", open(path, encoding="utf-8").read(), re.M)
+
+    def list_commands(mod, categories):
         out = os.path.join(work, mod + ".commands.json")
+        if os.path.isfile(out) and json.load(open(out, encoding="utf-8")).get("version") != 2:
+            os.remove(out)
         if not os.path.isfile(out):
-            run(["lean", "--run", slice_lean, "commands", module_path(args.src, mod), out], args.src, env)
+            run(["lean", "--run", slice_lean, "commands", module_path(args.src, mod), out] + categories,
+                args.src, env)
         return mod, json.load(open(out, encoding="utf-8"))
 
     META = {"Lean.Parser.Command.syntax", "Lean.Parser.Command.macro", "Lean.Parser.Command.macro_rules",
@@ -558,10 +569,16 @@ def main():
                 unattributed.append(c["name"])
         touched = set(cl["modules"]) | {c["module"] for c in own}
         all_mods = import_closure(touched)
+        category_mods = {m: categories_of(m) for m in all_mods}
+        categories = sorted({f"cat:{c}" for cs in category_mods.values() for c in cs}
+                            | {f"mod:{m}" for m, cs in category_mods.items() if cs})
         with ThreadPoolExecutor(max_workers=args.jobs) as ex:
-            for mod, d in ex.map(list_commands, sorted(all_mods - set(commands))):
+            for mod, d in ex.map(lambda m: list_commands(m, categories), sorted(all_mods - set(commands))):
                 commands[mod] = d
-        new_full = ({m for m in all_mods if any(c["kind"] in META for c in commands[m]["commands"])}
+        # a module declaring a category is not a notation module to keep in
+        # full: its parsers are dropped and the uses expanded instead
+        new_full = ({m for m in all_mods if not category_mods[m]
+                     and any(c["kind"] in META for c in commands[m]["commands"])}
                     if not args.whole_modules else set(all_mods))
         extra = set()
         for m in new_full - full:
@@ -637,10 +654,13 @@ def main():
                 return False
             return m.group("kw") == "instance" or bool(silent_attrs.search(m.group("attrs") or ""))
         keep, content = [], False
+        drops_syntax = bool(category_mods.get(mod))
         for cmd in commands[mod]["commands"]:
             k = cmd["kind"]
             if k == "header":
                 keep.append(cmd); continue
+            if drops_syntax and (k in META or k == "Lean.Parser.Command.syntaxCat"):
+                stats["dropped"] += 1; continue
             if mod in full:
                 keep.append(cmd); content = True; continue
             if k in SCAFFOLD:
@@ -727,13 +747,12 @@ def main():
                     continue
                 a = at(l0, c0); b = at(l1, c1)
                 tok = text[a:b]
-                if not (n == tok or n.endswith("." + tok)):
-                    # a dot-identifier (`.isClause`) or a token under some
-                    # notation: left as written, since the declaration moves
-                    # with its namespace block or is reachable by alias
-                    stats["unpatched"].append((mod, n, tok)); continue
-                if a > 0 and text[a - 1] == ".":
-                    stats["unpatched"].append((mod, n, tok)); continue
+                if not (n == tok or n.endswith("." + tok)) or (a > 0 and text[a - 1] == "."):
+                    # a dot-identifier (`.isClause`), a token under some
+                    # notation, or generalized field notation (`t.varOf`):
+                    # left as written, resolved through the `export` alias
+                    stats["aliased"] = stats.get("aliased", 0) + 1
+                    continue
                 patches.append((a, b, new))
             d = r.get("definition")
             if d and d[0] == d[2]:
@@ -794,7 +813,29 @@ def main():
         for cmd in keep:
             a, b = byte_to_char[cmd["start"]], byte_to_char[cmd["end"]]
             chunk = text[a:b]
-            for pa, pb, new in reversed([p for p in patches if a <= p[0] and p[1] <= b]):
+            # uses of the library's syntax categories, replaced by the terms
+            # they expanded to (outermost only), the ilean patches inside such
+            # a range being replaced by a name-based rewrite of the expansion
+            spans = sorted(((byte_to_char[m["start"]], byte_to_char[m["end"]], m["text"])
+                            for m in cmd.get("macros", [])), key=lambda m: (m[0], -m[1]))
+            outer, last_end = [], -1
+            for ma, mb, mt in spans:
+                if ma >= last_end:
+                    outer.append((ma, mb, mt)); last_end = mb
+            expanded = [(ma, mb) for ma, mb, _ in outer]
+            def in_expansion(pos):
+                return any(ma <= pos < mb for ma, mb in expanded)
+            local = [p for p in patches if a <= p[0] and p[1] <= b and not in_expansion(p[0])]
+            foreign_here = {n for n in foreign if refs.get(n)
+                            for u in refs[n]["usages"] if u[0] == u[2] and in_expansion(at(u[0], u[1]))}
+            edits = [(pa, pb, new) for pa, pb, new in local]
+            for ma, mb, mt in outer:
+                for n in foreign_here:
+                    short = n.rpartition(".")[2]
+                    mt = re.sub(r"(?<![\w.'])" + re.escape(short) + r"(?![\w'])", f"{pname}.Foreign.{n}", mt)
+                edits.append((ma, mb, mt))
+                stats["expanded_uses"] = stats.get("expanded_uses", 0) + 1
+            for pa, pb, new in sorted(edits, reverse=True):
                 chunk = chunk[:pa - a] + new + chunk[pb - a:]
                 stats["patched"] += 1
             k = cmd["kind"]
@@ -886,9 +927,10 @@ def main():
     modules = sorted(vendored)
     print(f"{len(modules)} modules written: kept {stats['kept']} declaration commands, dropped {stats['dropped']}, "
           f"{stats['lines']} lines, {stats['instances']} silent declarations kept, {stats['expanded']} commands expanded, "
-          f"{stats['patched']} foreign-name patches, {len(stats['unpatched'])} usages left alone", file=sys.stderr)
-    for u in stats["unpatched"][:10]:
-        print("  unpatched:", u, file=sys.stderr)
+          f"{stats['patched']} foreign-name patches, {stats.get('aliased', 0)} uses through aliases",
+          file=sys.stderr)
+    for u in sorted(set(stats["unpatched"])):
+        print("  not handled:", u, file=sys.stderr)
     if stats.get("mismatch", 0):
         sys.exit(f"{stats['mismatch']} declaration ids do not match their constants' names: the build under "
                  f"{args.library} is not a build of the sources exported (ref {args.ref or 'working tree'})")

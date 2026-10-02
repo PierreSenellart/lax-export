@@ -12,4 +12,8 @@ theorem main (b : Box) (n : Nat) (c : Nat.FixtureColor) :
 
 theorem rooted : Rooted.value = 3 := rfl
 
+/-- A use of the category: `fix% double 2` is `2 + 2`, and the vendored
+module must say so without the category. -/
+theorem category_use : (fix% double 2) = 4 := rfl
+
 end Fixture
