@@ -67,7 +67,8 @@ def _config(tmp_path, body):
 def test_config_loads_the_example(tmp_path):
     cfg = le.load_config(os.path.join(le.HERE, "examples", "np-core.yaml"))
     assert cfg["prefix"] == "DescriptiveComplexity"
-    assert "DescriptiveComplexity.SAT_NP_complete" in cfg["target"]
+    assert "DescriptiveComplexity.SAT_complete_for_ntmAccept" in cfg["target"]
+    assert cfg["restated"]["DescriptiveComplexity.TMData"] == "Machines.TMData"
     assert cfg["manifest"]["title"].startswith("Descriptive complexity")
     assert cfg["out"] == os.path.join(le.HERE, "examples")
 

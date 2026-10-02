@@ -30,15 +30,20 @@ unsafe def main (args : List String) : IO UInt32 := do
     if let some m := moduleOf env c then
       if pfx.isPrefixOf m then
         n := n + 1
-        if !pfx.isPrefixOf c && !c.isInternal then bad := bad.push c
+        -- reserved names (`f.eq_1`, `f.congr_simp`) are realized on demand in
+        -- whichever package first needs them, and the archive exempts them
+        if !pfx.isPrefixOf c && !c.isInternal && !isReservedName env c then bad := bad.push c
   IO.println s!"constants in package: {n}; outside prefix: {bad.size}"
   for c in bad.qsort (fun a b => a.toString < b.toString) do IO.println s!"  {c}"
   let background : List Name := [`propext, `Classical.choice, `Quot.sound]
+  -- the statements of the submission's own concept package (`LaxN` for
+  -- `LaxNProofs`) are admissible assumptions, as for the archive
+  let concepts := (if pkg.endsWith "Proofs" then pkg.dropRight 6 else pkg).toName
   let mut failures := 0
   for t in targets do
     let (axs, _) ← (collectAxioms t.toName : CoreM (Array Name)).toIO
       { fileName := "<check>", fileMap := FileMap.ofString "" } { env }
-    let extra := axs.toList.filter (!background.contains ·)
+    let extra := axs.toList.filter fun a => !background.contains a && !concepts.isPrefixOf a
     IO.println s!"{t}: {axs.toList}"
     if !extra.isEmpty then failures := failures + 1
   return if failures == 0 then 0 else 2

@@ -77,6 +77,28 @@ The library and what to export:
   descriptive-complexity example needs none.
 - `whole_modules`: vendor every module of the import closure in full
   instead of slicing. The fallback when slicing misses something.
+- `restated`: a mapping from library declarations to the concept
+  declarations that restate them, `MyLib.Graph: Graphs.Graph`. The concepts
+  of a Lax submission must define what its statements are about, and a
+  statement about the library's own notion would be a statement about a
+  copy nobody else can cite; so the concept package restates the
+  definitions, and the proofs package uses those. A concept name is relative
+  to the submission's own concept package, whose `LaxN` prefix the tool
+  takes from the manifest; a fully qualified `LaxN.…` name is reserved for
+  the declaration of another, registered submission (not supported yet).
+  For each mapped declaration the tool drops the library's defining
+  command, renames the constants that command generated (constructors,
+  projections, derived instances, equation lemmas) after the concept's, and
+  patches every use in the vendored code. The declaration must be restated
+  with the same signature, binder for binder, so that the vendored proofs
+  elaborate against it; a declaration the same command declares alongside
+  it (an instance a `deriving` clause adds, a `fo_language`-style command's
+  whole output) must be mapped too, which the tool checks. Library
+  declarations that remain under the namespace of a restated one, say a
+  lemma `MyLib.Graph.degree_le`, stay vendored and get an `export` alias
+  under the concept's namespace so that field notation on the concept type
+  still finds them. `examples/np-core.yaml` restates seventy-odd
+  declarations this way.
 
 The submission:
 
@@ -167,9 +189,12 @@ cd ../lax-123456/proofs && lake build
 LEAN_PATH=… lean --run Check.lean Lax123456Proofs Lax123456Proofs.MyLib.main_theorem
 ```
 
-`Check.lean` lists every constant of the package outside its prefix and the
-axioms of the targets, and exits non-zero when a target rests on more than
-`propext`, `Classical.choice` and `Quot.sound`.
+`Check.lean` lists every constant of the package outside its prefix, except
+the reserved names Lean realizes on demand (`f.eq_1`, `f.congr_simp`), which
+the archive's inspector exempts too, and the axioms of the targets; it exits
+non-zero when a target rests on more than `propext`, `Classical.choice`,
+`Quot.sound` and the statements of the submission's own concept package,
+which the archive admits as assumptions.
 
 ## How it works
 
@@ -188,14 +213,19 @@ axioms of the targets, and exits non-zero when a target rests on more than
    declares a selected constant, or when it is an instance or an attributed
    lemma that tactics use without leaving a trace in proof terms (`@[simp]`
    lemmas proved by `rfl`, coercion instances) and it still elaborates.
-   Modules declaring syntax, macros or elaborators are vendored in full and
-   their declarations fed back as targets, to a fixed point; a module
-   declaring a syntax category is the exception, since the category's
-   constant cannot carry the prefix: its parsers are dropped and every use
-   of its notation is expanded in place, from the macro expansions Lean
-   recorded, to the term it stands for. A scaffolding command mentioning an
-   unselected library constant is dropped.
-4. **Rename.** The library's namespace moves under `LaxNProofs` by a
+   The notations, macros and elaborators the library defines are kept as
+   scaffolding, and the constants their defining commands mention, the helper
+   functions a `macro_rules` body calls, are fed back as targets, to a fixed
+   point, since a notation leaves no constant in a term. A module declaring
+   a syntax category is the exception, since the category's constant cannot
+   carry the prefix: its parsers are dropped and every use of its notation
+   is expanded in place, from the macro expansions Lean recorded, to the
+   term it stands for. A scaffolding command mentioning an unselected
+   library constant is dropped.
+4. **Restate.** The defining command of each declaration in `restated` is
+   dropped, its constants renamed after the concept's, and a kept
+   declaration under a restated namespace gets an alias there.
+5. **Rename.** The library's namespace moves under `LaxNProofs` by a
    whole-name rewrite. Constants the library declares in foreign namespaces
    (Mathlib's, say `FirstOrder.Language.sat`) are renamed usage by usage from
    the `.ilean` records and rooted under `LaxNProofs.Foreign.…`, with an
@@ -203,9 +233,9 @@ axioms of the targets, and exits non-zero when a target rests on more than
    finds them; unnamed instances get the name the library's build gave them;
    `deriving` clauses are re-derived in a jump namespace that replays the
    scaffolding it had to close.
-5. **Imports.** An import of a dropped module is replaced by the vendored
+6. **Imports.** An import of a dropped module is replaced by the vendored
    modules and the Mathlib modules below it.
-6. **Layout.** Lakefiles, toolchain files, root modules, manifest
+7. **Layout.** Lakefiles, toolchain files, root modules, manifest
    and license, per the Lax archive's spec.
 
 Whatever the slicer misses fails the build of the package, which is the test.

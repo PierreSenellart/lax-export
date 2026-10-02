@@ -12,6 +12,10 @@ theorem main (b : Box) (n : Nat) (c : Nat.FixtureColor) :
 
 theorem rooted : Rooted.value = 3 := rfl
 
+/-- Field names in structure instances, and a generated name of the shared
+structure. -/
+theorem shared_fields : unit = shifted 0 := unit_eq
+
 /-- A use of the category: `fix% double 2` is `2 + 2`, and the vendored
 module must say so without the category. -/
 theorem category_use : (fix% double 2) = 4 := rfl

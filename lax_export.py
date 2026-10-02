@@ -15,9 +15,9 @@ and its built oleans):
   1. closure: the proof-term closure of the targets, every constant with its
      module and source range; generated constants (no range) are attributed
      to the declaration that generated them by stripping name components.
-     Modules declaring syntax, macros or elaborators are vendored in full and
-     their declarations fed back as targets, since a notation leaves no
-     constant in a term; this iterates to a fixed point.
+     The constants the library's notation-defining commands mention are fed
+     back as targets, since a notation leaves no constant in a term; this
+     iterates to a fixed point.
   2. commands: each module of the import closure is elaborated against its
      own imports and its commands listed with kinds and ranges; a command a
      library-defined elaborator produced is captured from the info trees.
@@ -308,7 +308,7 @@ def write_licenses(src, out, copyright_line, force):
 MANIFEST_KEYS = {"id", "title", "authors", "bibEntries", "supersedes", "unlisted", "anonymous",
                  "issue", "paper", "initialOwners"}
 CONFIG_KEYS = {"library", "ref", "prefix", "targets", "options", "whole_modules",
-               "copyright", "force_license", "env", "manifest", "out"}
+               "copyright", "force_license", "env", "manifest", "out", "restated"}
 
 
 def load_config(path):
@@ -338,7 +338,12 @@ def load_config(path):
         if p is None or is_url(str(p)):
             return p
         return os.path.normpath(os.path.join(base, os.path.expanduser(str(p))))
+    restated = raw.get("restated") or {}
+    if not isinstance(restated, dict) or not all(isinstance(k, str) and isinstance(v, str)
+                                                 for k, v in restated.items()):
+        sys.exit(f"{path}: `restated` maps library declarations to concept declarations")
     return {
+        "restated": restated,
         "library": raw["library"] if is_url(str(raw["library"])) else rel(raw["library"]),
         "ref": raw.get("ref"),
         "prefix": raw["prefix"],
@@ -477,7 +482,7 @@ def main():
     cfg = load_config(args.config)
     args.out = os.path.abspath(args.out or cfg["out"])
     for key in ("prefix", "target", "set_option", "whole_modules",
-                "copyright", "force_license", "env", "manifest", "library", "ref"):
+                "copyright", "force_license", "env", "manifest", "library", "ref", "restated"):
         setattr(args, key, cfg[key])
     existing = existing_manifest(args.out)
     if "id" in args.manifest and "id" in existing and args.manifest["id"] != existing["id"]:
@@ -552,7 +557,7 @@ def main():
 
     targets = set(args.target)
     commands = {}
-    full = set()                    # modules vendored in full: they define syntax
+    full = set()                    # modules vendored in full: only with --whole-modules
     for round_ in range(4):
         cl = run_closure(targets)
         own = [c for c in cl["constants"] if c["own"]]
@@ -575,24 +580,31 @@ def main():
         with ThreadPoolExecutor(max_workers=args.jobs) as ex:
             for mod, d in ex.map(lambda m: list_commands(m, categories), sorted(all_mods - set(commands))):
                 commands[mod] = d
-        # a module declaring a category is not a notation module to keep in
-        # full: its parsers are dropped and the uses expanded instead
-        new_full = ({m for m in all_mods if not category_mods[m]
-                     and any(c["kind"] in META for c in commands[m]["commands"])}
-                    if not args.whole_modules else set(all_mods))
+        # what the library's notations and macros rest on: the constants their
+        # defining commands mention (helper functions a `macro_rules` body
+        # calls, say) become targets, so that the closure brings them in; a
+        # module declaring a category is left out, its parsers being dropped
+        # and the uses expanded instead
+        if args.whole_modules:
+            full = set(all_mods)
         extra = set()
-        for m in new_full - full:
-            # every declaration of a notation module becomes a target, so that
-            # what the metaprograms rest on is selected too
+        for m in all_mods:
+            if category_mods[m] or args.whole_modules:
+                continue
+            meta = [c for c in commands[m]["commands"] if c["kind"] in META]
+            if not meta:
+                continue
             d = ilean(args.build, m)
             for n, r in d.items():
-                if r["module"] == m and r.get("definition") and not n.startswith("_private."):
-                    extra.add(n)
-        full |= new_full
+                if not r["module"].startswith(pfx) or n.startswith("_private."):
+                    continue
+                for u in r["usages"]:
+                    if any(c["line"] <= u[0] + 1 <= c["endLine"] for c in meta):
+                        extra.add(n); break
         extra = {n for n in extra if n not in targets}
         if not extra:
             break
-        print(f"round {round_ + 1}: {len(new_full)} notation modules, {len(extra)} declarations added as targets",
+        print(f"round {round_ + 1}: {len(extra)} declarations the library's notations rest on added as targets",
               file=sys.stderr)
         targets |= extra
     for a in cl["axioms"]:
@@ -605,8 +617,8 @@ def main():
     for n in selected:
         c = ranged[n]
         by_mod.setdefault(c["module"], []).append((c["range"]["line"], c["range"]["endLine"], n))
-    print(f"{len(selected)} declarations selected; {len(all_mods)} modules in the import closure, "
-          f"{len(full)} vendored in full for their syntax", file=sys.stderr)
+    print(f"{len(selected)} declarations selected; {len(all_mods)} modules in the import closure",
+          file=sys.stderr)
     for mod, d in commands.items():
         if d["errors"]:
             print(f"warning: {mod}: {len(d['errors'])} elaboration errors, first: {d['errors'][0][:200]}", file=sys.stderr)
@@ -676,6 +688,86 @@ def main():
         if content:
             decisions[mod] = (text, byte_to_char, refs, keep)
     vendored = set(decisions)
+
+    # Declarations the concepts restate verbatim (`restated`): the library's
+    # copy is dropped, every constant the declaring command generates is
+    # renamed to the concept's, and every use is patched. A concept name is
+    # relative to this submission's concept package unless it names another
+    # Lax package outright.
+    restated = {}
+    for k, v in args.restated.items():
+        if re.match(r"Lax\d+\.", v):
+            if not v.startswith(cname + "."):
+                sys.exit(f"restated: {v} is not a declaration of the concept package {cname} "
+                         "(concept dependencies are not supported yet)")
+            restated[k] = v
+        else:
+            restated[k] = f"{cname}.{v}"
+    def within(n, lib):
+        return n == lib or n.startswith(lib + ".")
+    def mapped_under(n):
+        """The longest mapped declaration `n` is, or is a descendant of."""
+        best = None
+        for lib in restated:
+            if within(n, lib) and (best is None or len(lib) > len(best)):
+                best = lib
+        return best
+    def restated_name(n):
+        lib = mapped_under(n)
+        return restated[lib] + n[len(lib):] if lib else None
+    GENERATED = re.compile(r"\.(rec|recOn|casesOn|noConfusion|noConfusionType|below|brecOn|ibelow|"
+                           r"binductionOn|mk\.(inj|injEq|sizeOf_spec)|sizeOf_spec|match_\d+|proof_\d+|"
+                           r"eq_\d+|eq_def|ext|ext_iff|inj|injEq|ctorIdx|ofNat_ctorIdx|toCtorIdx|ofNat)$")
+    concept_modules = sorted({".".join(v.split(".")[:2]) for v in restated.values()})
+    substituted = {}            # library constant -> concept constant
+    for mod, (text, byte_to_char, refs, keep) in list(decisions.items()):
+        defined = {n: r["definition"] for n, r in refs.items()
+                   if r["module"] == mod and r.get("definition") and not n.startswith("_private.")}
+        def cmd_index(line0):
+            for i, c in enumerate(keep):
+                if c["kind"] != "header" and c["line"] <= line0 + 1 <= c["endLine"]:
+                    return i
+            return None
+        to_drop = set()
+        for n, d in defined.items():
+            if n not in restated:
+                continue
+            i = cmd_index(d[0])
+            if i is None:
+                continue
+            # the command is dropped whole, so every constant it declares
+            # must have a concept counterpart: mapped itself, generated from
+            # a mapped one (a constructor, a projection), or auto-generated
+            siblings = [m for m, dm in defined.items() if cmd_index(dm[0]) == i]
+            missing = [m for m in siblings if restated_name(m) is None and not GENERATED.search(m)]
+            if missing:
+                sys.exit(f"restated: the command declaring {n} in {mod} also declares {missing}, which "
+                         f"must be restated too (map them in `restated`)")
+            to_drop.add(i)
+            for m in siblings:
+                substituted[m] = restated_name(m) or m
+        if to_drop:
+            decisions[mod] = (text, byte_to_char, refs, [c for i, c in enumerate(keep) if i not in to_drop])
+            stats["restated_dropped"] = stats.get("restated_dropped", 0) + len(to_drop)
+    all_defined = {n for m, (_, _, refs, _) in decisions.items()
+                   for n, r in refs.items() if r["module"] == m and r.get("definition")}
+    def substitute(n):
+        # a constant the dropped command generated without a definition
+        # record of its own (`Config.mk.injEq`) follows its parent
+        if n in substituted:
+            return substituted[n]
+        return restated_name(n) if n not in all_defined else None
+    def field_binder(a, b, n):
+        """`state := …` or `relFormula R t := …` in a structure instance
+        names a field, not a use: a bare field name opening its line (or
+        following `{` or `,`), with `:=` later on the line."""
+        tok = text[a:b]
+        if "." in tok or not (n.rpartition(".")[0] in substituted or n.rpartition(".")[0] in foreign):
+            return False
+        before = text[text.rfind("\n", 0, a) + 1:a]
+        after = text[b:text.find("\n", b) if text.find("\n", b) >= 0 else len(text)]
+        return re.search(r"(?:^|[{,])\s*$", before) is not None and ":=" in after
+
     # foreign-namespace constants: declared by a kept command of a vendored
     # module, outside the prefix, not private; the earlier set from the
     # closure misses declarations kept by the silent rule.
@@ -691,6 +783,7 @@ def main():
     # plus what the closure selected outside the prefix: constants a
     # library-defined command generated have no definition record of their own
     foreign |= {n for n in selected if not n.startswith(pfx + ".") and not n.startswith("_private.")}
+    foreign = {n for n in foreign if substitute(n) is None}
     memo = {}
     def below(mod):
         if mod in memo:
@@ -734,8 +827,40 @@ def main():
             return None
         patches = []
         exports = {}
+        aliases = {}          # concept namespace -> {short: (position, proofs namespace)}
         defs_here = {n: refs[n]["definition"] for n in foreign
                      if refs.get(n) and refs[n].get("definition")}
+        # uses of restated constants: the concept's name, wherever written
+        for n, r in refs.items():
+            new = substitute(n)
+            if new is None:
+                continue
+            for u in r["usages"]:
+                if u[0] != u[2]:
+                    continue
+                a = at(u[0], u[1]); b = at(u[2], u[3])
+                tok = text[a:b]
+                if not (n == tok or n.endswith("." + tok)) or (a > 0 and text[a - 1] == "."):
+                    continue
+                if field_binder(a, b, n):
+                    continue
+                patches.append((a, b, new))
+        # a kept library declaration under a restated namespace, a theorem about
+        # the restated structure say: an alias at the concept's namespace, so
+        # that field notation on the concept type finds it
+        for n, r in refs.items():
+            d = r.get("definition")
+            if not d or r["module"] != mod or n.startswith("_private.") or substitute(n) is not None:
+                continue
+            lib = mapped_under(n)
+            if lib and lib != n and d[0] == d[2]:
+                con = restated[lib]
+                rest = n[len(lib) + 1:]
+                ns_concept = con + ("." + rest.rpartition(".")[0] if "." in rest else "")
+                short = rest.rpartition(".")[2]
+                proofs_ns = (f"{pname}.{n.rpartition('.')[0]}" if n.startswith(pfx + ".")
+                             else f"{pname}.Foreign.{n.rpartition('.')[0]}")
+                aliases.setdefault(ns_concept, {})[short] = (at(d[0], d[1]), proofs_ns)
         for n in foreign:
             r = refs.get(n)
             if not r:
@@ -752,6 +877,8 @@ def main():
                     # notation, or generalized field notation (`t.varOf`):
                     # left as written, resolved through the `export` alias
                     stats["aliased"] = stats.get("aliased", 0) + 1
+                    continue
+                if field_binder(a, b, n):
                     continue
                 patches.append((a, b, new))
             d = r.get("definition")
@@ -785,7 +912,7 @@ def main():
                   "Lean.Parser.Command.set_option", "Lean.Parser.Command.omit", "Lean.Parser.Command.include"}
         def current_ns():
             return ".".join(n for kind, n, _ in depth if kind == "namespace")
-        def jump(body_text, derived=False):
+        def jump(body_text, derived=False, namespace=None):
             """Declare `body_text` outside the current namespace chain: close
             every level, open a jump namespace, close it, reopen the levels
             and replay the scaffolding each had executed, which closing them
@@ -801,7 +928,10 @@ def main():
             for kind, name, scaffold in depth:
                 reopens.append(f"{kind} {name}" if name else kind)
                 reopens.extend(scaffold)
-            if derived:
+            if namespace:
+                ns_new = namespace
+                inside = []
+            elif derived:
                 ns_new = f"{pname}.Derived"
                 prefixes = [".".join(cur.split(".")[:i + 1]) for i in range(len(cur.split("."))) if cur]
                 inside = ([f"open {' '.join(prefixes)}"] if prefixes else []) + \
@@ -874,6 +1004,15 @@ def main():
                     body_text = "\n".join(f"deriving instance {c} for {pname}.Foreign.{rooted[0]}" for c in classes)
                     chunk = chunk + "\n\n" + jump(body_text, derived=True)
             alias_lines = []
+            for ns_concept, shorts in aliases.items():
+                here = {sh: pns for sh, (pos, pns) in shorts.items() if a <= pos < b}
+                if not here:
+                    continue
+                by_pns = {}
+                for sh, pns in here.items():
+                    by_pns.setdefault(pns, []).append(sh)
+                body_text = "\n".join(f"export {pns} ({' '.join(sorted(shs))})" for pns, shs in by_pns.items())
+                alias_lines.append(jump(body_text, namespace=ns_concept))
             for ns, shorts in exports.items():
                 here = [sh for sh, pos in shorts.items() if a <= pos < b]
                 if not here:
@@ -912,6 +1051,9 @@ def main():
                         continue
                     if line not in lines or not line.startswith("import "):
                         lines.append(line)
+                for cm in concept_modules:
+                    if f"import {cm}" not in lines:
+                        lines.append(f"import {cm}")
                 chunk = "\n".join(lines)
             pieces.append(chunk)
             pieces.extend(alias_lines)
@@ -927,7 +1069,8 @@ def main():
     modules = sorted(vendored)
     print(f"{len(modules)} modules written: kept {stats['kept']} declaration commands, dropped {stats['dropped']}, "
           f"{stats['lines']} lines, {stats['instances']} silent declarations kept, {stats['expanded']} commands expanded, "
-          f"{stats['patched']} foreign-name patches, {stats.get('aliased', 0)} uses through aliases",
+          f"{stats['patched']} foreign-name patches, {stats.get('aliased', 0)} uses through aliases, "
+          f"{stats.get('restated_dropped', 0)} restated declarations taken from the concepts",
           file=sys.stderr)
     for u in sorted(set(stats["unpatched"])):
         print("  not handled:", u, file=sys.stderr)

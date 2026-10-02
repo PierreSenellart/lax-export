@@ -8,6 +8,18 @@ namespace Fixture
 structure Box where
   val : Nat
 
+/-- Structure-instance syntax on the shared structure: the field names must
+stay bare once `Box` comes from the concepts. -/
+def unit : Box := { val := 1 }
+
+/-- The same with a binder-carrying field, as a function. -/
+def shifted (k : Nat) : Box where
+  val := k + 1
+
+/-- A generated constant of the shared structure, used by name. -/
+theorem unit_eq : unit = shifted 0 := by
+  simp only [unit, shifted, Box.mk.injEq]
+
 /-- The coercion: an instance the proof terms never mention. -/
 instance : CoeFun Box (fun _ => Nat → Nat) := ⟨fun b n => b.val + n⟩
 

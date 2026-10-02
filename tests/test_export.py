@@ -58,6 +58,11 @@ def submission(tmp_path_factory):
     (out / "concepts" / f"Lax{ID}" / "Main.lean").write_text(
         f"import Mathlib.Logic.Basic\n\n/-!\n---\ntitle: The fixture's theorem\ntype: theorem\n---\n"
         f"Stands in for a concept.\n-/\n\nnamespace Lax{ID}.Main\n\naxiom holds : 1 + 1 = 2\n\nend Lax{ID}.Main\n")
+    (out / "concepts" / f"Lax{ID}" / "Box.lean").write_text(
+        f"import Mathlib.Logic.Basic\n\n/-!\n---\ntitle: A box\ntype: definition\n---\n"
+        f"Restates the library's `Box`, which the proofs then use.\n-/\n\nnamespace Lax{ID}.Box\n\n"
+        f"/-- A box, applied to numbers through a coercion. -/\nstructure Box where\n  val : Nat\n\n"
+        f"end Lax{ID}.Box\n")
     (out / "proofs" / f"Lax{ID}Proofs").mkdir(parents=True)
     (out / "proofs" / f"Lax{ID}Proofs" / "Bridge.lean").write_text(
         f"import Lax{ID}.Main\nimport Lax{ID}Proofs.Fixture.Main\n\nnamespace Lax{ID}Proofs\n\n"
@@ -79,19 +84,24 @@ def test_layout_and_manifest(submission):
     assert (submission / "abstract.md").read_text() == "A fixture for lax-export.\n"   # left alone
     roots = (submission / "proofs" / f"Lax{ID}Proofs.lean").read_text()
     assert f"import Lax{ID}Proofs.Bridge" in roots
-    assert (submission / "concepts" / f"Lax{ID}.lean").read_text() == f"import Lax{ID}.Main\n"
+    assert (submission / "concepts" / f"Lax{ID}.lean").read_text() == f"import Lax{ID}.Box\nimport Lax{ID}.Main\n"
 
 
 def test_slicing(submission):
     vend = submission / "proofs" / f"Lax{ID}Proofs" / "Fixture"
     written = sorted(os.path.relpath(f, vend) for f in glob.glob(str(vend / "**" / "*.lean"), recursive=True))
     assert "Extra.lean" not in written                                # imported, never reached
-    assert "Command.lean" in written                                   # a notation module, in full
+    assert "Command.lean" not in written     # its command is expanded at the use, so nothing of it is needed
     assert "Syntax.lean" not in written           # declares a category: its parsers are dropped, uses expanded
     basic = (vend / "Basic.lean").read_text()
     assert "unused_lemma" not in basic
     assert "instance : CoeFun" in basic and "theorem box_apply" in basic   # silent declarations kept
+    assert "structure Box" not in basic                                 # restated: taken from the concepts
+    assert f"CoeFun Lax{ID}.Box.Box" in basic and f"import Lax{ID}.Box" in basic
     assert "import Lax900001Proofs.Fixture.Extra" not in basic
+    assert "def unit : Lax900001.Box.Box := { val := 1 }" in basic       # field names stay bare
+    assert "\n  val := k + 1" in basic
+    assert "simp only [unit, shifted, Lax900001.Box.Box.mk.injEq]" in basic  # generated names follow
     foreign = (vend / "Foreign.lean").read_text()
     assert f"def _root_.Lax{ID}Proofs.Foreign.Nat.fixtureDouble" in foreign
     assert f"export Lax{ID}Proofs.Foreign.Nat (fixtureDouble" in foreign  # field notation alias

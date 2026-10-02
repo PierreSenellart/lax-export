@@ -7,9 +7,12 @@ targets:
   - Fixture.uses_secret
   - Fixture.rooted
   - Fixture.category_use
+  - Fixture.shared_fields
 copyright: 2026 Pierre Senellart
 manifest:
   title: "lax-export fixture"
   authors:
     - name: Pierre Senellart
       github: PierreSenellart
+restated:                     # verbatim in the concept package; the test writes that file
+  Fixture.Box: Box.Box
