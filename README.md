@@ -115,7 +115,7 @@ The submission:
   names are free-form, which is how the archive's entries credit the
   generative models used, and the identifiers are for credit only,
   ownership being a separate list of GitHub accounts set with `lax owners`.
-- `copyright`: the one trailing "YYYY NAME" line the Lax archive allows after
+- `copyright`: the one trailing “YYYY NAME” line the Lax archive allows after
   the Apache 2.0 text of the submission's `LICENSE`.
 - `force_license`: write the submission even if the library's license does
   not permit redistribution under Apache 2.0 (see Licenses).

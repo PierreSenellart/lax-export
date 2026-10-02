@@ -8,7 +8,7 @@ the package declares carries its prefix, and the targets rest on the
 background axioms only. Run with the toolchain on PATH and the package's
 build plus its dependencies' on LEAN_PATH:
 
-  lean --run Check.lean <package prefix, e.g. Lax261Proofs> <target constant>...
+  lean --run Check.lean <package prefix, e.g., Lax261Proofs> <target constant>...
 -/
 import Lean
 

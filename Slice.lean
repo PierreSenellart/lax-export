@@ -18,10 +18,10 @@ axioms, and the touched modules of the prefix.
 elaborates one source file against its own imports and lists its commands:
 syntax kind, byte range, line range, and, for each use of a notation
 involving one of the given syntax categories (the ones the library declares,
-which can never carry a package prefix), the term it expanded to. Elaboration rather than parsing, because
-a file's own `local notation` and `open scoped` change how the rest of it
-parses. One process per file: `importModules (loadExts := true)` is a
-once-per-process affair.
+which can never carry a package prefix), the term it expanded to.
+Elaboration rather than parsing, because a file's own `local notation` and
+`open scoped` change how the rest of it parses. One process per file:
+`importModules (loadExts := true)` is a once-per-process affair.
 
 Python decides what to keep and how to rename; this program never writes
 Lean source.
