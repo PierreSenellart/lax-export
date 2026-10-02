@@ -257,7 +257,25 @@ backward bridges so the Lax archive's proof network shows cross-submission
 dependencies; links from a library's README and docstrings to the Lax archive
 pages; a CI job regenerating and building every submission at each tag.
 
+## Authorship
+
+`lax-export` was written by Pierre Senellart, with the assistance of
+generative models from Anthropic (*Claude*). The behavior of the tool was
+specified and reviewed by the author, who is responsible for the whole.
+Regression tests run in continuous integration.
+
 ## License
 
-Apache 2.0, the license of Lean, Mathlib and Lax's own tooling.
-Copyright 2026 Pierre Senellart.
+Copyright © 2026 by Pierre Senellart.
+
+Licensed under the Apache License, Version 2.0, the license of Lean,
+Mathlib and Lax's own tooling; see [LICENSE](LICENSE).
+
+## Contact
+
+<https://github.com/PierreSenellart/lax-export>
+
+Pierre Senellart <pierre@senellart.com>
+
+Bug reports and feature requests should preferably be submitted through the
+*Issues* feature of GitHub.
