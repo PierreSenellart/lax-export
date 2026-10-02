@@ -12,8 +12,3 @@ manifest:
   authors:
     - name: Pierre Senellart
       github: PierreSenellart
-abstract: |
-  A fixture for `lax-export`: a theorem resting on a coercion, a `@[simp]`
-  lemma proved by `rfl`, a macro, declarations in a foreign namespace with a
-  derived instance, a generated constant, a private name and a `_root_`
-  declaration.

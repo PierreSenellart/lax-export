@@ -52,6 +52,7 @@ def submission(tmp_path_factory):
         f'specVersion: "1"\nid: lax-{ID}\nleanVersion: "v4.33.0"\n'
         f'mathlibVersion: "db584cd6d46c92f209a44c0f1c829460d327499d"\ntitle: sub\nauthors: []\n'
         f'bibEntries: []\nissue:\n  repositoryId: 1320232165\n  number: 1\n')
+    (out / "abstract.md").write_text("A fixture for lax-export.\n")
     (out / "concepts" / f"Lax{ID}").mkdir(parents=True)
     (out / "concepts" / f"Lax{ID}" / "Main.lean").write_text(
         f"import Mathlib.Logic.Basic\n\n/-!\n---\ntitle: The fixture's theorem\ntype: theorem\n---\n"
@@ -73,7 +74,7 @@ def test_layout_and_manifest(submission):
     assert "issue:" in manifest and "number: 1" in manifest          # what lax submit wrote survives
     assert (submission / "LICENSE").read_text().rstrip().endswith("Copyright 2026 Pierre Senellart")
     assert not (submission / "NOTICE").exists()                     # the fixture is Apache 2.0 too
-    assert (submission / "abstract.md").read_text().startswith("A fixture for")
+    assert (submission / "abstract.md").read_text() == "A fixture for lax-export.\n"   # left alone
     roots = (submission / "proofs" / f"Lax{ID}Proofs.lean").read_text()
     assert f"import Lax{ID}Proofs.Bridge" in roots
     assert (submission / "concepts" / f"Lax{ID}.lean").read_text() == f"import Lax{ID}.Main\n"

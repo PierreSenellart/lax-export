@@ -35,7 +35,7 @@ and its built oleans):
      jump namespace.
   5. imports: an import of a dropped module is replaced by the vendored
      modules and Mathlib modules below it.
-  6. layout: lakefiles, toolchain, root modules, manifest, abstract, license.
+  6. layout: lakefiles, toolchain, root modules, manifest, license.
 
 Concept files and bridge proofs are hand-written and copied in from
 `--concepts` and `--bridges` (each file's `LaxN`/`LaxNProofs` placeholders
@@ -308,7 +308,7 @@ def write_licenses(src, out, copyright_line, force):
 MANIFEST_KEYS = {"id", "title", "authors", "bibEntries", "supersedes", "unlisted", "anonymous",
                  "issue", "paper", "initialOwners"}
 CONFIG_KEYS = {"library", "ref", "prefix", "targets", "options", "whole_modules",
-               "copyright", "force_license", "env", "manifest", "abstract", "abstract_file", "out"}
+               "copyright", "force_license", "env", "manifest", "out"}
 
 
 def load_config(path):
@@ -334,12 +334,6 @@ def load_config(path):
     for a in manifest.get("authors", []):
         if not isinstance(a, dict) or "name" not in a or set(a) - {"name", "orcid", "github"}:
             sys.exit(f"{path}: each author is a mapping with `name` and optional `orcid`, `github`")
-    if "abstract" in raw:
-        abstract = raw["abstract"]
-    elif "abstract_file" in raw:
-        abstract = open(os.path.join(base, raw["abstract_file"]), encoding="utf-8").read()
-    else:
-        sys.exit(f"{path}: `abstract` or `abstract_file` is required")
     def rel(p):
         if p is None or is_url(str(p)):
             return p
@@ -355,7 +349,6 @@ def load_config(path):
         "force_license": bool(raw.get("force_license", False)),
         "env": raw.get("env"),
         "manifest": manifest,
-        "abstract": abstract,
         "out": rel(raw.get("out", ".")),
     }
 
@@ -484,7 +477,7 @@ def main():
     cfg = load_config(args.config)
     args.out = os.path.abspath(args.out or cfg["out"])
     for key in ("prefix", "target", "set_option", "whole_modules",
-                "copyright", "force_license", "env", "manifest", "abstract", "library", "ref"):
+                "copyright", "force_license", "env", "manifest", "library", "ref"):
         setattr(args, key, cfg[key])
     existing = existing_manifest(args.out)
     if "id" in args.manifest and "id" in existing and args.manifest["id"] != existing["id"]:
@@ -934,7 +927,6 @@ def main():
         elif key in existing:                      # `issue` is what lax submit wrote
             manifest[key] = existing[key]
     write(os.path.join(args.out, "manifest.yaml"), dump_manifest(manifest))
-    write(os.path.join(args.out, "abstract.md"), args.abstract.rstrip("\n") + "\n")
     write_licenses(args.src, args.out, args.copyright, args.force_license)
     if not os.path.isfile(os.path.join(args.out, ".gitignore")):
         write(os.path.join(args.out, ".gitignore"), "build-output.json\nlake-manifest.json\n.lake/\n")

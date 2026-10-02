@@ -78,7 +78,6 @@ def test_config_requires_the_essentials_and_rejects_unknown_keys(tmp_path):
             library: .
             prefix: L
             manifest: {title: t}
-            abstract: a
             """))
     with pytest.raises(SystemExit, match="unknown keys"):
         le.load_config(_config(tmp_path, """
@@ -86,7 +85,6 @@ def test_config_requires_the_essentials_and_rejects_unknown_keys(tmp_path):
             prefix: L
             targets: [L.x]
             manifest: {title: t}
-            abstract: a
             bogus: 1
             """))
     with pytest.raises(SystemExit, match="not in the Lax archive's schema"):
@@ -95,7 +93,6 @@ def test_config_requires_the_essentials_and_rejects_unknown_keys(tmp_path):
             prefix: L
             targets: [L.x]
             manifest: {title: t, license: MIT}
-            abstract: a
             """))
     with pytest.raises(SystemExit, match="each author"):
         le.load_config(_config(tmp_path, """
@@ -103,22 +100,18 @@ def test_config_requires_the_essentials_and_rejects_unknown_keys(tmp_path):
             prefix: L
             targets: [L.x]
             manifest: {title: t, authors: [{name: a, email: x}]}
-            abstract: a
             """))
 
 
 def test_config_paths_are_relative_to_the_file(tmp_path):
-    (tmp_path / "abs.md").write_text("The abstract.\n")
     cfg = le.load_config(_config(tmp_path, """
         library: ../lib
         prefix: L
         targets: [L.x]
         manifest: {title: t}
-        abstract_file: abs.md
         out: sub
         """))
     assert cfg["library"] == os.path.normpath(os.path.join(str(tmp_path), "../lib"))
-    assert cfg["abstract"] == "The abstract.\n"
     assert cfg["out"] == os.path.join(str(tmp_path), "sub")
 
 

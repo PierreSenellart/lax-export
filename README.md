@@ -38,10 +38,11 @@ lax_export.py my-submission/export.yaml
 
 The tool reads the id from the folder's `manifest.yaml`, rewrites the
 generated files (lakefiles, toolchain files, root modules, manifest,
-abstract, license), and writes the vendored library under
+license), and writes the vendored library under
 `proofs/LaxNProofs/<prefix>/`. Everything hand-written lives in the same
-folder and is left alone: the concept modules in `concepts/LaxN/`, the
-bridge proofs anywhere in `proofs/LaxNProofs/` outside the vendored tree;
+folder and is left alone: `abstract.md`, the concept modules in
+`concepts/LaxN/`, the bridge proofs anywhere in `proofs/LaxNProofs/` outside
+the vendored tree;
 the root modules import whatever is there. Running the tool again replaces
 the vendored tree and nothing else. Whatever `lax submit` adds to the
 manifest, the `issue` binding above all, is preserved.
@@ -92,19 +93,6 @@ The submission:
   names are free-form, which is how the archive's entries credit the
   generative models used, and the identifiers are for credit only,
   ownership being a separate list of GitHub accounts set with `lax owners`.
-- `abstract` or `abstract_file` (one required): the submission's abstract,
-  Markdown with `$…$` math.
-
-  Where the library should appear. Lax's citation block names only the
-  formalizers, and its page renders `bibEntries` as a references section, so
-  the library belongs there as a software citation of the exported version
-  (its DOI, as in the example), beside the papers; the abstract should link
-  the repository and the documentation, since a reader of the page sees
-  nothing else of the library; and each concept's docstring can link the
-  documentation page of the declaration it restates, which is where the
-  reader lands on the real code. The first two are the author's to write in
-  the export file; the third is for the generator to emit from the
-  concept-to-declaration mapping, once that exists.
 - `copyright`: the one trailing "YYYY NAME" line the Lax archive allows after
   the Apache 2.0 text of the submission's `LICENSE`.
 - `force_license`: write the submission even if the library's license does
@@ -213,7 +201,7 @@ axioms of the targets, and exits non-zero when a target rests on more than
    scaffolding it had to close.
 5. **Imports.** An import of a dropped module is replaced by the vendored
    modules and the Mathlib modules below it.
-6. **Layout.** Lakefiles, toolchain files, root modules, manifest, abstract
+6. **Layout.** Lakefiles, toolchain files, root modules, manifest
    and license, per the Lax archive's spec.
 
 Whatever the slicer misses fails the build of the package, which is the test.
