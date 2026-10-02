@@ -275,11 +275,11 @@ still catch a constant outside the prefix or an unexpected axiom.
 - The rewrite assumes the library keeps its declarations under one top-level
   namespace, foreign-namespace declarations aside.
 
-Not yet done: the registry that lets a later submission require an earlier
-one instead of vendoring the same declarations again; the substitution of
-backward bridges so the Lax archive's proof network shows cross-submission
-dependencies; links from a library's README and docstrings to the Lax archive
-pages; a CI job regenerating and building every submission at each tag.
+Not yet done: requiring an earlier submission's concept package, so that a
+later submission restates nothing twice; and cutting the closure at a theorem
+an earlier submission already states, so that the later proofs assume that
+statement, as the Lax archive's proof network expects, instead of vendoring
+its proof again.
 
 ## Authorship
 
