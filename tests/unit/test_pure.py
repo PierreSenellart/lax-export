@@ -176,3 +176,10 @@ def test_config_requires_and_reuses_a_restated_map(tmp_path):
             requires:
               - {package: Lax1, repository: https://x, commit: abc, folder: f}
             """))
+
+
+def test_printed_forms_are_the_spellings_a_pretty_printer_may_use():
+    assert le.printed_forms("Lib.Graph.adj", "Lib") == ["Lib.Graph.adj", "Graph.adj"]
+    assert le.printed_forms("FirstOrder.Language.graph", "Lib") == \
+        ["FirstOrder.Language.graph", "Language.graph", "graph"]
+    assert le.printed_forms("Other.thing", "Lib") == ["Other.thing"]

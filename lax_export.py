@@ -498,6 +498,17 @@ def attribute_generated(name, ranged):
 
 
 ATTRIBUTE_SUBSTITUTES = {"instance_reducible": "reducible"}
+
+
+def printed_forms(lib, pfx):
+    """The spellings a pretty-printer may use for the constant `lib`: in full,
+    or relative to the library's root or to Mathlib's `FirstOrder.Language`,
+    which the library opens."""
+    out = [lib]
+    for root in (pfx + ".", "FirstOrder.", "FirstOrder.Language."):
+        if lib.startswith(root):
+            out.append(lib[len(root):])
+    return out
 DERIVING_WHITELIST = {"Repr", "DecidableEq", "Inhabited", "Fintype", "BEq", "Hashable"}
 
 
@@ -548,6 +559,23 @@ def write_skeletons(args, cname, pfx, restated, restated_cmds, decisions, comman
         pieces, imports, notes, opens = [], [], [], set()
         emitted = [["namespace", cm, {}]]      # open levels: kind, name, scaffolding emitted per library level
         pieces.append(f"namespace {cm}")
+        def substitute_printed(txt):
+            """Restated names in a pretty-printed expansion, which writes a
+            name in full or relative to an open namespace, rewritten to the
+            concept's; docstrings are left alone."""
+            def forms(lib):
+                return printed_forms(lib, pfx)
+            def in_code(seg):
+                for lib, con in sorted(restated.items(), key=lambda kv: -len(kv[0])):
+                    module = ".".join(con.split(".")[:2])
+                    new = relative(con) if con.startswith(cm + ".") else con[len(module) + 1:]
+                    for form in forms(lib):
+                        seg, n = re.subn(r"(?<![\w.'])" + re.escape(form) + r"(?![\w'])", new, seg)
+                        if n and not con.startswith(cm + "."):
+                            opens.add(module)
+                return seg
+            parts = re.split(r"(/--.*?-/)", txt, flags=re.S)
+            return "".join(p if p.startswith("/--") else in_code(p) for p in parts)
         def relative(con):
             """A concept name as written inside the module namespace and the
             nested namespaces currently open."""
@@ -569,12 +597,19 @@ def write_skeletons(args, cname, pfx, restated, restated_cmds, decisions, comman
                 notation_uses = {c["start"]: c.get("macros", []) for c in expanded_listing(mod)["commands"]}
                 for level in emitted:
                     level[2] = {}
-                for imp in imports_of(mod):
-                    if imp.startswith(pfx + "."):
-                        _, ext = below(imp)
-                        imports.extend(f"import {j}" for j in sorted(ext))
-                    else:
-                        imports.append(f"import {imp}")
+                # every Mathlib module the source module reaches: a concept
+                # has no library module to inherit imports from
+                stack, seen_mods = [mod], set()
+                while stack:
+                    m = stack.pop()
+                    if m in seen_mods:
+                        continue
+                    seen_mods.add(m)
+                    for imp in imports_of(m):
+                        if imp.startswith(pfx + "."):
+                            stack.append(imp)
+                        elif f"import {imp}" not in imports:
+                            imports.append(f"import {imp}")
                 line_starts = [0] + [i + 1 for i, ch in enumerate(text) if ch == "\n"]
                 def at(l, c16):
                     pos, units = line_starts[l], 0
@@ -597,19 +632,7 @@ def write_skeletons(args, cname, pfx, restated, restated_cmds, decisions, comman
                         return any(ma <= pos < mb for ma, mb, _ in outer)
                     edits = []
                     for ma, mb, mt in outer:
-                        # the expansion is printed relative to the library's
-                        # root namespace, so a restated name appears in full
-                        # or without the prefix
-                        for lib, con in sorted(restated.items(), key=lambda kv: -len(kv[0])):
-                            if con.startswith(cm + "."):
-                                new = relative(con)
-                            else:
-                                opens.add(".".join(con.split(".")[:2]))
-                                new = con[len(".".join(con.split(".")[:2])) + 1:]
-                            forms = [lib] + ([lib[len(pfx) + 1:]] if lib.startswith(pfx + ".") else [])
-                            for form in forms:
-                                mt = re.sub(r"(?<![\w.'])" + re.escape(form) + r"(?![\w'])", new, mt)
-                        edits.append((ma, mb, mt))
+                        edits.append((ma, mb, substitute_printed(mt)))
                     for n, r in refs.items():
                         d = r.get("definition")
                         if n in own_defs and d and d[0] == d[2]:
@@ -661,17 +684,26 @@ def write_skeletons(args, cname, pfx, restated, restated_cmds, decisions, comman
             def chunk_of(c):
                 return text[byte_to_char[c["start"]]:byte_to_char[c["end"]]]
             def reopen_text(open_chunk):
+                cur = ".".join(n for k, n, _ in lib_depth if k == "namespace")
                 def sub(m):
                     name = m.group(0)
                     if name in ("in", "scoped", "hiding", "renaming"):
                         return name
-                    cur = ".".join(n for k, n, _ in lib_depth if k == "namespace")
                     for lib, con in restated.items():
                         if lib in (f"{cur}.{name}", f"{pfx}.{name}"):
                             return relative(con)
+                    # a namespace of the library that nothing restated: the
+                    # concept has nothing to open there, and an unknown
+                    # namespace aborts the whole `open`
+                    for full in (f"{cur}.{name}.", f"{pfx}.{name}."):
+                        if any(n.startswith(full) for n in refs):
+                            notes.append(f"{cm}: `open {name}` dropped, a library namespace the concepts lack")
+                            return ""
                     return name
                 head, _, rest = open_chunk.partition("open")
-                return head + "open" + re.sub(r"(?<![\w.'])[A-Za-z_][\w'.]*(?![\w'])", sub, rest)
+                rest = re.sub(r"(?<![\w.'])[A-Za-z_][\w'.]*(?![\w'])", sub, rest)
+                rest = re.sub(r"[ \t]+", " ", rest).rstrip()
+                return (head + "open" + rest) if rest.strip() not in ("", "in") else ""
             pending_attributes = []
             for c in all_cmds[walked:idx]:
                 k = c["kind"]
@@ -747,30 +779,33 @@ def write_skeletons(args, cname, pfx, restated, restated_cmds, decisions, comman
             # the build's, mapped under the command's namespace
             lib_ns = ".".join(n for k, n, _ in lib_depth if k == "namespace")
             inst_names = [con for lib, con in own.items()
-                          if lib.rpartition(".")[2].startswith("inst")
+                          if lib.rpartition(".")[2].startswith("inst") and con.startswith(cm + ".")
                           and (lib in defs_here or lib.rpartition(".")[0] == lib_ns)
                           and f"instance {relative(con)}" not in "\n".join(pieces)]
             expansion = cmd.get("expansion")
             if expansion and not cmd["kind"].startswith("Lean.Parser.Command."):
                 body = "\n\n".join(re.sub(r"(?<!^)(?<!\n)(?<!\s)(/--)", r"\n\1", e) for e in expansion)
-                for lib, con in sorted(defs_here.items(), key=lambda kv: -len(kv[0])):
-                    short_lib, short_con = lib.rpartition(".")[2], relative(con)
-                    body = body.replace(f"_root_.{lib}", short_con).replace(lib, short_con)
-                    if short_lib != short_con.rpartition(".")[2] and not short_lib.startswith("inst"):
-                        body = re.sub(r"(?<![\w.'])" + re.escape(short_lib) + r"(?![\w'])", short_con, body)
-                        notes.append(f"{cm}: the expansion declaring {lib} was renamed to {short_con} "
-                                     "by a word-level substitution; check it")
+                body = body.replace("_root_.", "")
                 body = re.sub(r"\(([A-Za-z_][\w'.]*)\)\.", r"\1.", body)
+                body = substitute_printed(body)
+                body = re.sub(r"^(\s*(?:@\[[^\]]*\]\s*)*)protected\s+", r"\1", body, flags=re.M)
+                for lib, con in defs_here.items():
+                    short_lib, short_con = lib.rpartition(".")[2], relative(con).rpartition(".")[2]
+                    if short_lib != short_con and not short_lib.startswith("inst"):
+                        notes.append(f"{cm}: the expansion declaring {lib} is renamed to {relative(con)} "
+                                     "by a word-level substitution; check it")
                 body = re.sub(r"-/\n\n(\s*\|)", r"-/\n\1", body)
             else:
                 a, b = byte_to_char[cmd["start"]], byte_to_char[cmd["end"]]
                 body = patched(a, b, defs_here, notation_uses.get(cmd["start"], []))
             body = re.sub(r"^(\s*(?:/-.*?-/\s*)?(?:@\[[^\]]*\]\s*)*)protected\s+", r"\1", body, count=1, flags=re.S)
             body = body.replace("_root_.", "")
-            m = re.search(r"\binstance(\s*(?:\([^)]*\)\s*)?):\s*([\w.]+)", body)
+            m = re.search(r"\binstance(\s*(?:\([^)]*\)\s*)?):\s*([\w.]+)(?:\s+([\w.]+))?", body)
             if m and inst_names:
                 cls = m.group(2).rpartition(".")[2].lower()
-                chosen = [c for c in inst_names if cls in c.lower()] or (inst_names if len(inst_names) == 1 else [])
+                arg = (m.group(3) or "").rpartition(".")[2].lower()
+                chosen = [c for c in inst_names if cls in c.lower() and (not arg or arg in c.lower())] \
+                    or [c for c in inst_names if cls in c.lower()] or (inst_names if len(inst_names) == 1 else [])
                 if chosen:
                     body = body[:m.start()] + f"instance {relative(chosen[0])}{m.group(1)}:" + body[m.end(1) + 1:]
             m = re.search(r"\n\s*deriving\s+([^\n]+)$", body)
@@ -1074,6 +1109,8 @@ def main():
     concept_modules = sorted({".".join(v.split(".")[:2]) for v in restated.values()})
     substituted = {}            # library constant -> concept constant
     restated_cmds = {}          # module -> the commands the concepts replace, in order
+    EXPANDED_DECL = re.compile(r"^\s*(?:@\[[^\]]*\]\s*)*(?:private\s+|protected\s+|noncomputable\s+|scoped\s+)*"
+                               r"(?:def|abbrev|inductive|structure|class|instance|theorem)\s+([\w.']+)", re.M)
     for mod, (text, byte_to_char, refs, keep) in list(decisions.items()):
         defined = {n: r["definition"] for n, r in refs.items()
                    if r["module"] == mod and r.get("definition") and not n.startswith("_private.")}
@@ -1082,17 +1119,42 @@ def main():
                 if c["kind"] != "header" and c["line"] <= line0 + 1 <= c["endLine"]:
                     return i
             return None
-        to_drop = set()
+        # constants a library-defined command declares through its recorded
+        # expansion carry no definition record of their own (`fo_predicates`
+        # writes its shorthands without source positions): attribute them to
+        # the command, under the namespace open at it
+        declared_by = {}            # command index -> constants it declares
+        for i, c in enumerate(keep):
+            exp = c.get("expansion")
+            if not exp or c["kind"].startswith("Lean.Parser.Command."):
+                continue
+            ns = []
+            for d in keep[:i]:
+                if d["kind"] == "Lean.Parser.Command.namespace":
+                    ns.append(("namespace", text[byte_to_char[d["start"]]:byte_to_char[d["end"]]].split()[1]))
+                elif d["kind"] in ("Lean.Parser.Command.section", "Lean.Parser.Command.noncomputableSection"):
+                    ns.append(("section", ""))
+                elif d["kind"] == "Lean.Parser.Command.end" and ns:
+                    ns.pop()
+            cur = ".".join(n for k, n in ns if k == "namespace")
+            for e in exp:
+                for m in EXPANDED_DECL.finditer(e):
+                    name = m.group(1)
+                    full = name[6:] if name.startswith("_root_.") else (f"{cur}.{name}" if cur else name)
+                    declared_by.setdefault(i, set()).add(full)
         for n, d in defined.items():
-            if n not in restated:
-                continue
             i = cmd_index(d[0])
-            if i is None:
+            if i is not None:
+                declared_by.setdefault(i, set()).add(n)
+        to_drop = set()
+        for i, names in declared_by.items():
+            if not any(n in restated for n in names):
                 continue
+            n = next(n for n in names if n in restated)
             # the command is dropped whole, so every constant it declares
             # must have a concept counterpart: mapped itself, generated from
             # a mapped one (a constructor, a projection), or auto-generated
-            siblings = [m for m, dm in defined.items() if cmd_index(dm[0]) == i]
+            siblings = sorted(names)
             missing = [m for m in siblings if restated_name(m) is None and not GENERATED.search(m)]
             if missing:
                 sys.exit(f"restated: the command declaring {n} in {mod} also declares {missing}, which "
@@ -1293,7 +1355,10 @@ def main():
                 inside = ([f"open {' '.join(prefixes)}"] if prefixes else []) + \
                          [c for _, _, sc in depth for c in sc if c.startswith("open")]
             else:
-                ns_new = f"{pname}.Foreign.{cur}" if cur else f"{pname}.Foreign"
+                if cur == pfx or cur.startswith(pfx + "."):
+                    ns_new = f"{pname}.{cur}"         # the library's own namespace, rewritten
+                else:
+                    ns_new = f"{pname}.Foreign.{cur}" if cur else f"{pname}.Foreign"
                 inside = []
             return "\n\n".join(closes + [f"namespace {ns_new}"] + inside + [body_text, f"end {ns_new}"] + reopens)
         for cmd in keep:
@@ -1319,6 +1384,16 @@ def main():
                 for n in foreign_here:
                     short = n.rpartition(".")[2]
                     mt = re.sub(r"(?<![\w.'])" + re.escape(short) + r"(?![\w'])", f"{pname}.Foreign.{n}", mt)
+                # a restated declaration, printed in full or relative to an
+                # open namespace: the concept's name
+                for lib, con in sorted(restated.items(), key=lambda kv: -len(kv[0])):
+                    for form in printed_forms(lib, pfx):
+                        mt = re.sub(r"(?<![\w.'])" + re.escape(form) + r"(?![\w'])", con, mt)
+                # a printed term may run over several lines; a continuation
+                # at column 0 would end the enclosing block, so the whole
+                # expansion is indented past the point it replaces
+                col = ma - text.rfind("\n", 0, ma) - 1
+                mt = mt.replace("\n", "\n" + " " * (col + 2))
                 edits.append((ma, mb, mt))
                 stats["expanded_uses"] = stats.get("expanded_uses", 0) + 1
             for pa, pb, new in sorted(edits, reverse=True):
@@ -1407,8 +1482,21 @@ def main():
                     and all("<missing>" not in e for e in expansion)):
                 texts = [re.sub(r"(?<!^)(?<!\n)(?<!\s)(/--)", r"\n\1", e) for e in expansion]
                 body_exp = "\n\n".join(texts)
-                for n in foreign:
-                    body_exp = body_exp.replace(f"_root_.{n}", f"_root_.{pname}.Foreign.{n}")
+                def printed_code(seg):
+                    # the elaborator printed names in full or relative to an
+                    # open namespace: restated ones become the concept's,
+                    # foreign ones are rooted
+                    for lib, con in sorted(restated.items(), key=lambda kv: -len(kv[0])):
+                        for form in printed_forms(lib, pfx):
+                            seg = re.sub(r"(?<![\w.'])" + re.escape(form) + r"(?![\w'])", con, seg)
+                    for n in sorted(foreign, key=len, reverse=True):
+                        seg = seg.replace(f"_root_.{n}", f"_root_.{pname}.Foreign.{n}")
+                        for form in printed_forms(n, pfx):
+                            seg = re.sub(r"(?<![\w.'])" + re.escape(form) + r"(?![\w'])",
+                                         f"_root_.{pname}.Foreign.{n}", seg)
+                    return seg
+                body_exp = "".join(part if part.startswith("/--") else printed_code(part)
+                                   for part in re.split(r"(/--.*?-/)", body_exp, flags=re.S))
                 chunk = jump(body_exp)
                 stats["expanded"] += 1
             if k == "header":

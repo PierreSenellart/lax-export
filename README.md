@@ -157,7 +157,15 @@ and `open` lines. Attributes the concept dialect refuses are substituted
 clause outside the dialect's class list, and a library theorem a definition
 mentions (the invariance proof of a bundled problem, say), are noted for the
 author, since a concept cannot carry a theorem. The module docstring is a
-stub. The drafts are a starting point: copy them into `concepts/LaxN/`, write
+stub. Each draft imports what its source modules import from Mathlib, in
+full, since a concept has no library module to inherit from; an `open` of a
+namespace the concepts lack is dropped with a note; an unnamed instance is
+given the name Lean gave it in the library, when that can be read off the
+restated map; and a term the library's notation expanded to is written with
+the concept's names. A constant a library-defined command writes without a
+source position of its own (a `fo_predicates`-style shorthand) is attributed
+to the command that produced it, so that restating the command restates
+those too. The drafts are a starting point: copy them into `concepts/LaxN/`, write
 the prose and the claims, and resolve the notes. Nothing under `skeleton/` is
 read back.
 
