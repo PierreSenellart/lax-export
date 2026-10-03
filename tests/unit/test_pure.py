@@ -36,7 +36,7 @@ def test_manifest_dump_quotes_scalars_and_uses_literal_blocks():
                              "bibEntries": ["@misc{k,\n  title = {x}\n}\n"],
                              "unlisted": True, "issue": {"repositoryId": 1, "number": 2}})
     assert 'orcid: "0000-0002-1825-0097"' in text
-    assert "- |\n  @misc{k," in text
+    assert "bibEntries:\n  - |\n    @misc{k," in text          # indented items, as the Lax CLI writes them
     assert "unlisted: true" in text
     assert yaml.safe_load(text)["issue"] == {"repositoryId": 1, "number": 2}
 

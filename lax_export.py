@@ -388,9 +388,17 @@ def _mark(value):
     return value                     # booleans and the issue numbers stay as they are
 
 
+class _Dumper(yaml.SafeDumper):
+    """PyYAML writes a list under a key flush with the key; the Lax CLI, which
+    rewrites the manifest at `lax submit`, indents its items. Match it, so
+    that a re-export after a submit leaves the manifest unchanged."""
+    def increase_indent(self, flow=False, indentless=False):
+        return super().increase_indent(flow, False)
+
+
 def dump_manifest(manifest):
-    return yaml.safe_dump(_mark(manifest), sort_keys=False, allow_unicode=True,
-                          default_flow_style=False, width=1000)
+    return yaml.dump(_mark(manifest), Dumper=_Dumper, sort_keys=False, allow_unicode=True,
+                     default_flow_style=False, width=1000)
 
 
 def existing_manifest(out):
