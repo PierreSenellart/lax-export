@@ -7,13 +7,13 @@ The Lean half of the Lax export tool: what Lean knows and Python cannot
 guess. Run with the library's toolchain on PATH and its built oleans on
 LEAN_PATH, from the library's source root.
 
-  lean --run lax/Slice.lean closure <prefix> <out.json> <target constant>...
+  lean --run Slice.lean closure <prefix> <out.json> <target constant>...
 
 reports the targets' proof-term closure: every constant reached, with its
 module and source range (generated constants have none), the targets'
 axioms, and the touched modules of the prefix.
 
-  lean --run lax/Slice.lean commands <source file> <out.json> [<syntax category>...]
+  lean --run Slice.lean commands <source file> <out.json> [<syntax category>...]
 
 elaborates one source file against its own imports and lists its commands:
 syntax kind, byte range, line range, and, for each use of a notation
