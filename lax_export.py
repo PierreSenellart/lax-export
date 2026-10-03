@@ -308,7 +308,8 @@ def write_licenses(src, out, copyright_line, force):
 MANIFEST_KEYS = {"id", "title", "authors", "bibEntries", "supersedes", "unlisted", "anonymous",
                  "issue", "paper", "initialOwners"}
 CONFIG_KEYS = {"library", "ref", "prefix", "targets", "options", "whole_modules",
-               "copyright", "force_license", "env", "manifest", "out", "restated"}
+               "copyright", "force_license", "env", "manifest", "out", "restated", "requires"}
+REQUIRE_KEYS = {"package", "repository", "commit", "folder", "restated_from"}
 
 
 def load_config(path):
@@ -342,8 +343,33 @@ def load_config(path):
     if not isinstance(restated, dict) or not all(isinstance(k, str) and isinstance(v, str)
                                                  for k, v in restated.items()):
         sys.exit(f"{path}: `restated` maps library declarations to concept declarations")
+    requires = []
+    for r in raw.get("requires") or []:
+        if not isinstance(r, dict) or set(r) - REQUIRE_KEYS or not {"package", "repository",
+                                                                      "commit", "folder"} <= set(r):
+            sys.exit(f"{path}: each entry of `requires` is a mapping with `package`, `repository`, "
+                     "`commit`, `folder` and optionally `restated_from`")
+        if not re.fullmatch(r"Lax[1-9][0-9]*", str(r["package"])):
+            sys.exit(f"{path}: requires.package must be a concept package `LaxN`")
+        if not re.fullmatch(r"[0-9a-f]{40}", str(r["commit"])):
+            sys.exit(f"{path}: requires.commit must be the full 40-character commit of the "
+                     "registered submission")
+        if not str(r["repository"]).startswith("https://"):
+            sys.exit(f"{path}: requires.repository must be the submission's canonical https URL")
+        entry = {k: str(r[k]) for k in ("package", "repository", "commit", "folder")}
+        entry["folder"] = entry["folder"].strip("/")
+        if "restated_from" in r:
+            other = rel(r["restated_from"])
+            with open(other, encoding="utf-8") as fh:
+                theirs = (yaml.safe_load(fh) or {}).get("restated") or {}
+            # their relative names are relative to *their* package
+            for lib, con in theirs.items():
+                qualified = con if re.match(r"Lax\d+\.", con) else f"{entry['package']}.{con}"
+                restated.setdefault(lib, qualified)
+        requires.append(entry)
     return {
         "restated": restated,
+        "requires": requires,
         "library": raw["library"] if is_url(str(raw["library"])) else rel(raw["library"]),
         "ref": raw.get("ref"),
         "prefix": raw["prefix"],
@@ -490,7 +516,8 @@ def main():
     cfg = load_config(args.config)
     args.out = os.path.abspath(args.out or cfg["out"])
     for key in ("prefix", "target", "set_option", "whole_modules",
-                "copyright", "force_license", "env", "manifest", "library", "ref", "restated"):
+                "copyright", "force_license", "env", "manifest", "library", "ref", "restated",
+                "requires"):
         setattr(args, key, cfg[key])
     existing = existing_manifest(args.out)
     if "id" in args.manifest and "id" in existing and args.manifest["id"] != existing["id"]:
@@ -703,11 +730,13 @@ def main():
     # relative to this submission's concept package unless it names another
     # Lax package outright.
     restated = {}
+    required_pkgs = {r["package"] for r in args.requires}
     for k, v in args.restated.items():
         if re.match(r"Lax\d+\.", v):
-            if not v.startswith(cname + "."):
-                sys.exit(f"restated: {v} is not a declaration of the concept package {cname} "
-                         "(concept dependencies are not supported yet)")
+            pkg = v.split(".")[0]
+            if pkg != cname and pkg not in required_pkgs:
+                sys.exit(f"restated: {v} is in package {pkg}, which is neither this submission's "
+                         f"concept package {cname} nor one listed under `requires`")
             restated[k] = v
         else:
             restated[k] = f"{cname}.{v}"
@@ -977,6 +1006,26 @@ def main():
                 chunk = chunk[:pa - a] + new + chunk[pb - a:]
                 stats["patched"] += 1
             k = cmd["kind"]
+            if k == "Lean.Parser.Command.open":
+                # a namespace opened by its library name: when it is the
+                # namespace of a restated declaration, the concept's namespace
+                # is what carries its contents now (the vendored package keeps
+                # the name only if something of it stayed vendored)
+                cur = current_ns()
+                def reopen(m):
+                    name = m.group(0)
+                    for lib, con in restated.items():
+                        if lib == f"{pfx}.{name}" or (cur and lib == f"{pfx}.{cur}.{name}"):
+                            vendored_too = any(n.startswith(lib + ".") and substitute(n) is None
+                                               and refs.get(n, {}).get("definition") for n in refs)
+                            stats["opens"] = stats.get("opens", 0) + 1
+                            return f"{con} {name}" if vendored_too else con
+                    return name
+                head, _, rest = chunk.partition("open")
+                rest = re.sub(r"(?<![\w.'])[A-Za-z_][\w'.]*(?![\w'])",
+                              lambda m: m.group(0) if m.group(0) in ("in", "scoped", "hiding", "renaming")
+                              else reopen(m), rest)
+                chunk = head + "open" + rest
             if k == "Lean.Parser.Command.namespace":
                 depth.append(["namespace", chunk.split()[1], []])
             elif k in ("Lean.Parser.Command.section", "Lean.Parser.Command.noncomputableSection"):
@@ -1095,8 +1144,11 @@ def main():
                           for f in glob.glob(os.path.join(concept_dir, "**", "*.lean"), recursive=True))
     write(os.path.join(args.out, "concepts", f"{cname}.lean"),
           "".join(f"import {m}\n" for m in concept_mods) or "-- the concept modules go in this folder\n")
+    required = "".join(f'\n[[require]]\nname = "{r["package"]}"\ngit = "{r["repository"]}"\n'
+                       f'rev = "{r["commit"]}"\nsubDir = "{r["folder"]}/concepts"\n'
+                       for r in args.requires)
     write(os.path.join(args.out, "concepts", "lakefile.toml"),
-          LAKEFILE.format(name=cname, mathlib=MATHLIB_URL, rev=args.mathlib_rev, extra=""))
+          LAKEFILE.format(name=cname, mathlib=MATHLIB_URL, rev=args.mathlib_rev, extra=required))
     write(os.path.join(args.out, "concepts", "lean-toolchain"), toolchain + "\n")
     proofs_dir = os.path.join(args.out, "proofs", pname)
     vendored_mods = [f"{pname}.{m}" for m in modules]
@@ -1104,7 +1156,7 @@ def main():
                          for f in glob.glob(os.path.join(proofs_dir, "**", "*.lean"), recursive=True)
                          if not os.path.relpath(f, proofs_dir).startswith(pfx + os.sep)
                          and os.path.relpath(f, proofs_dir) != pfx + ".lean")
-    extra = f'\n[[require]]\nname = "{cname}"\npath = "../concepts"\n'
+    extra = f'\n[[require]]\nname = "{cname}"\npath = "../concepts"\n' + required
     write(os.path.join(args.out, "proofs", "lakefile.toml"),
           LAKEFILE.format(name=pname, mathlib=MATHLIB_URL, rev=args.mathlib_rev, extra=extra))
     write(os.path.join(args.out, "proofs", "lean-toolchain"), toolchain + "\n")

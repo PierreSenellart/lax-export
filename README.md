@@ -99,6 +99,23 @@ The library and what to export:
   under the concept's namespace so that field notation on the concept type
   still finds them. `examples/np-core.yaml` restates seventy-odd
   declarations this way.
+- `requires`: the registered submissions this one builds on, each a mapping
+  with `package` (`LaxN`), `repository` (the canonical https URL),
+  `commit` (the full 40-character commit the archive registered) and
+  `folder` (the submission folder in that repository). Each becomes a
+  `[[require]]` of both packages, pinned exactly as the archive demands,
+  and `restated` values may then name declarations of that package in
+  full (`Lax904597.Sat.SAT`). With `restated_from`, the path of that
+  submission's own export file, its `restated` map is reused, qualified
+  with the package name, so that a catalog built on a core restates
+  nothing twice; entries written here take precedence. The archive accepts
+  a require on a registered submission only, so a chain is submitted and
+  registered bottom-up. Statements of a required package are admissible
+  assumptions of the bridges, which is how the archive's proof network gets
+  its cross-submission edges: a bridge that proves a catalog problem
+  NP-complete from the core's Cook–Levin statement and closure laws, rather
+  than from the library's own `NP_complete` theorem, assumes those
+  statements and vendors nothing of their proofs.
 
 The submission:
 
@@ -275,11 +292,11 @@ still catch a constant outside the prefix or an unexpected axiom.
 - The rewrite assumes the library keeps its declarations under one top-level
   namespace, foreign-namespace declarations aside.
 
-Not yet done: requiring an earlier submission's concept package, so that a
-later submission restates nothing twice; and cutting the closure at a theorem
-an earlier submission already states, so that the later proofs assume that
-statement, as the Lax archive's proof network expects, instead of vendoring
-its proof again.
+Not yet done: cutting the closure at a library theorem an earlier submission
+already states, so that a vendored proof that uses it assumes the statement
+instead. Choosing targets below such theorems and composing the archive's
+statements in the bridges achieves the same today; the cut would make it
+automatic.
 
 ## Authorship
 

@@ -142,3 +142,37 @@ def test_existing_manifest(tmp_path):
     assert le.existing_manifest(str(tmp_path)) == {}
     (tmp_path / "manifest.yaml").write_text('id: lax-5\nissue:\n  repositoryId: 1\n  number: 2\n')
     assert le.existing_manifest(str(tmp_path))["issue"]["number"] == 2
+
+
+def test_config_requires_and_reuses_a_restated_map(tmp_path):
+    (tmp_path / "core.yaml").write_text(
+        "library: .\nprefix: L\ntargets: [L.t]\nmanifest: {title: core}\n"
+        "restated:\n  L.Box: Boxes.Box\n  L.Open: Lax7.Other.Open\n")
+    cfg = le.load_config(_config(tmp_path, """
+        library: .
+        prefix: L
+        targets: [L.u]
+        manifest: {title: next}
+        requires:
+          - package: Lax123456
+            repository: https://example.org/repo
+            commit: 0123456789abcdef0123456789abcdef01234567
+            folder: lax/core/
+            restated_from: core.yaml
+        restated:
+          L.Thing: Things.Thing
+          L.Box: Boxes.Mine
+        """))
+    assert cfg["requires"] == [{"package": "Lax123456", "repository": "https://example.org/repo",
+                               "commit": "0123456789abcdef0123456789abcdef01234567", "folder": "lax/core"}]
+    assert cfg["restated"] == {"L.Thing": "Things.Thing", "L.Box": "Boxes.Mine",   # own entries win
+                               "L.Open": "Lax7.Other.Open"}                        # already qualified
+    with pytest.raises(SystemExit, match="40-character"):
+        le.load_config(_config(tmp_path, """
+            library: .
+            prefix: L
+            targets: [L.u]
+            manifest: {title: next}
+            requires:
+              - {package: Lax1, repository: https://x, commit: abc, folder: f}
+            """))

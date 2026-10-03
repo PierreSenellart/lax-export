@@ -36,14 +36,17 @@ unsafe def main (args : List String) : IO UInt32 := do
   IO.println s!"constants in package: {n}; outside prefix: {bad.size}"
   for c in bad.qsort (fun a b => a.toString < b.toString) do IO.println s!"  {c}"
   let background : List Name := [`propext, `Classical.choice, `Quot.sound]
-  -- the statements of the submission's own concept package (`LaxN` for
-  -- `LaxNProofs`) are admissible assumptions, as for the archive
-  let concepts := (if pkg.endsWith "Proofs" then pkg.dropRight 6 else pkg).toName
+  -- the statements of a concept package (`LaxN`, this submission's or a
+  -- required one) are admissible assumptions, as for the archive
+  let isConcept (a : Name) : Bool :=
+    match a.components with
+    | root :: _ => let s := root.toString; s.startsWith "Lax" && !s.endsWith "Proofs" && (s.drop 3).all Char.isDigit
+    | _ => false
   let mut failures := 0
   for t in targets do
     let (axs, _) ← (collectAxioms t.toName : CoreM (Array Name)).toIO
       { fileName := "<check>", fileMap := FileMap.ofString "" } { env }
-    let extra := axs.toList.filter fun a => !background.contains a && !concepts.isPrefixOf a
+    let extra := axs.toList.filter fun a => !background.contains a && !isConcept a
     IO.println s!"{t}: {axs.toList}"
     if !extra.isEmpty then failures := failures + 1
   return if failures == 0 then 0 else 2
