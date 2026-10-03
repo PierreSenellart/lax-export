@@ -144,6 +144,23 @@ The submission:
   repository on one of the hosts the archive accepts (GitHub, GitLab.com,
   Codeberg, Bitbucket Cloud), which `lax submit` then points the archive at.
 
+### Starting the concepts from the library
+
+`--skeleton` writes, under `<out>/skeleton/LaxN/`, a draft of every concept
+module that `restated` names: the library's own defining commands of the
+restated declarations, in library order, with their docstrings, renamed to
+the concept's names, every use of a restated declaration patched, the
+library's notations expanded to the terms they stand for, and the sections
+and nested namespaces they were declared in replayed with their `variable`
+and `open` lines. Attributes the concept dialect refuses are substituted
+(`@[instance_reducible]` becomes `@[reducible]`) and noted; a `deriving`
+clause outside the dialect's class list, and a library theorem a definition
+mentions (the invariance proof of a bundled problem, say), are noted for the
+author, since a concept cannot carry a theorem. The module docstring is a
+stub. The drafts are a starting point: copy them into `concepts/LaxN/`, write
+the prose and the claims, and resolve the notes. Nothing under `skeleton/` is
+read back.
+
 ### Command-line options
 
 Operational only:
@@ -157,6 +174,7 @@ Operational only:
   room for a Mathlib build (about 10 GB).
 - `--no-environment-check`: skip the check against the Lax archive's
   environment list and Mathlib's tag, for offline use.
+- `--skeleton`: also write the draft concept modules described above.
 - `--jobs N`: how many files to elaborate in parallel when listing commands
   (default 4).
 - `--work DIR`: where the plans go, the closure and per-file command

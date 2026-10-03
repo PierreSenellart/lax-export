@@ -497,6 +497,309 @@ def attribute_generated(name, ranged):
     return None
 
 
+ATTRIBUTE_SUBSTITUTES = {"instance_reducible": "reducible"}
+DERIVING_WHITELIST = {"Repr", "DecidableEq", "Inhabited", "Fintype", "BEq", "Hashable"}
+
+
+def write_skeletons(args, cname, pfx, restated, restated_cmds, decisions, commands, imports_of, below,
+                    expanded_listing):
+    """Draft concept modules under <out>/skeleton/<cname>/: for each concept
+    module named by a `restated` value of this package, the library's
+    defining commands of the declarations it restates, in library order,
+    with their docstrings, renamed to the concept's names, every use of a
+    restated declaration patched, the sections and nested namespaces they
+    were declared in replayed with their `variable` and `open` lines, and
+    attributes the concept dialect refuses substituted. A starting point,
+    never a result: the module docstring is a stub, and nothing here is
+    read back by the export."""
+    out_dir = os.path.join(args.out, "skeleton", cname)
+    own = {lib: con for lib, con in restated.items() if con.startswith(cname + ".")}
+    def concept_of(n):
+        """The concept name of a library constant, by the longest restated prefix."""
+        best = None
+        for lib in restated:
+            if (n == lib or n.startswith(lib + ".")) and (best is None or len(lib) > len(best)):
+                best = lib
+        return restated[best] + n[len(best):] if best else None
+    by_concept = {}             # concept module -> [(source module, command)]
+    for mod in sorted(restated_cmds):
+        for cmd in restated_cmds[mod]:
+            targets = {v for v in cmd["restated_defs"].values() if v.startswith(cname + ".")}
+            if targets:
+                by_concept.setdefault(".".join(sorted(targets)[0].split(".")[:2]), []).append((mod, cmd))
+    def import_order(mods):
+        """`mods` sorted so that a module follows the ones it imports."""
+        order, seen = [], set()
+        def visit(m):
+            if m in seen:
+                return
+            seen.add(m)
+            for i in imports_of(m):
+                if i in mods:
+                    visit(i)
+            order.append(m)
+        for m in sorted(mods):
+            visit(m)
+        return order
+    written = []
+    for cm, items in sorted(by_concept.items()):
+        rank = {m: i for i, m in enumerate(import_order({m for m, _ in items}))}
+        items = sorted(items, key=lambda it: (rank[it[0]], it[1]["start"]))
+        pieces, imports, notes, opens = [], [], [], set()
+        emitted = [["namespace", cm, {}]]      # open levels: kind, name, scaffolding emitted per library level
+        pieces.append(f"namespace {cm}")
+        def relative(con):
+            """A concept name as written inside the module namespace and the
+            nested namespaces currently open."""
+            inner = ".".join(n for k, n, _ in emitted[1:] if k == "namespace")
+            base = cm + ("." + inner if inner else "")
+            if con.startswith(base + "."):
+                return con[len(base) + 1:]
+            if con.startswith(cm + "."):
+                return con[len(cm) + 1:]
+            return con
+        current_source = None
+        for mod, cmd in items:
+            text, byte_to_char, refs, _ = decisions[mod]
+            if mod != current_source:
+                current_source = mod
+                lib_depth = []             # [kind, name, scaffolding (kind, chunk) list]
+                walked = 0
+                all_cmds = commands[mod]["commands"]
+                notation_uses = {c["start"]: c.get("macros", []) for c in expanded_listing(mod)["commands"]}
+                for level in emitted:
+                    level[2] = {}
+                for imp in imports_of(mod):
+                    if imp.startswith(pfx + "."):
+                        _, ext = below(imp)
+                        imports.extend(f"import {j}" for j in sorted(ext))
+                    else:
+                        imports.append(f"import {imp}")
+                line_starts = [0] + [i + 1 for i, ch in enumerate(text) if ch == "\n"]
+                def at(l, c16):
+                    pos, units = line_starts[l], 0
+                    while units < c16:
+                        units += 2 if ord(text[pos]) > 0xFFFF else 1
+                        pos += 1
+                    return pos
+                def patched(a, b, own_defs, macros=()):
+                    """The text of [a, b) with uses of restated declarations
+                    written as the concept's names, the ids of `own_defs`
+                    (library name -> concept name) renamed, and the library's
+                    notations (`macros`, outermost uses first) expanded."""
+                    spans = sorted(((byte_to_char[m["start"]], byte_to_char[m["end"]], m["text"])
+                                    for m in macros), key=lambda m: (m[0], -m[1]))
+                    outer, last_end = [], -1
+                    for ma, mb, mt in spans:
+                        if ma >= last_end and a <= ma and mb <= b:
+                            outer.append((ma, mb, mt)); last_end = mb
+                    def in_expansion(pos):
+                        return any(ma <= pos < mb for ma, mb, _ in outer)
+                    edits = []
+                    for ma, mb, mt in outer:
+                        # the expansion is printed relative to the library's
+                        # root namespace, so a restated name appears in full
+                        # or without the prefix
+                        for lib, con in sorted(restated.items(), key=lambda kv: -len(kv[0])):
+                            if con.startswith(cm + "."):
+                                new = relative(con)
+                            else:
+                                opens.add(".".join(con.split(".")[:2]))
+                                new = con[len(".".join(con.split(".")[:2])) + 1:]
+                            forms = [lib] + ([lib[len(pfx) + 1:]] if lib.startswith(pfx + ".") else [])
+                            for form in forms:
+                                mt = re.sub(r"(?<![\w.'])" + re.escape(form) + r"(?![\w'])", new, mt)
+                        edits.append((ma, mb, mt))
+                    for n, r in refs.items():
+                        d = r.get("definition")
+                        if n in own_defs and d and d[0] == d[2]:
+                            da, db = at(d[0], d[1]), at(d[2], d[3])
+                            if a <= da and db <= b and re.fullmatch(r"[\w.'«»]+", text[da:db]) \
+                                    and text[da:db] != "instance":
+                                parent = n.rpartition(".")[0]
+                                # a field or constructor is named by its parent's command
+                                new_id = (own_defs[n].rpartition(".")[2] if parent in own_defs
+                                          else relative(own_defs[n]))
+                                edits.append((da, db, new_id))
+                            continue
+                        con = concept_of(n)
+                        if con is None:
+                            if n.startswith(pfx + ".") and n not in own_defs and not n.startswith("_private."):
+                                for u in r["usages"]:
+                                    if u[0] == u[2] and a <= at(u[0], u[1]) and at(u[2], u[3]) <= b:
+                                        notes.append(f"{cm}: mentions `{n}`, which is not restated "
+                                                     "(a theorem cannot be; a concept must prove or state it)")
+                                        break
+                            continue
+                        if n in own_defs:
+                            continue
+                        for u in r["usages"]:
+                            if u[0] != u[2]:
+                                continue
+                            ua, ub = at(u[0], u[1]), at(u[2], u[3])
+                            if not (a <= ua and ub <= b) or in_expansion(ua):
+                                continue
+                            tok = text[ua:ub]
+                            if not (n == tok or n.endswith("." + tok)) or (ua > 0 and text[ua - 1] == "."):
+                                continue
+                            before = text[text.rfind("\n", 0, ua) + 1:ua]
+                            nl = text.find("\n", ub)
+                            after = text[ub:nl if nl >= 0 else len(text)]
+                            if "." not in tok and re.search(r"(?:^|[{,])\s*$", before) and ":=" in after:
+                                continue
+                            if con.startswith(cm + "."):
+                                new = relative(con)
+                            else:
+                                opens.add(".".join(con.split(".")[:2]))
+                                new = con[len(".".join(con.split(".")[:2])) + 1:]
+                            edits.append((ua, ub, new))
+                    out = text[a:b]
+                    for ea, eb, new in sorted(edits, reverse=True):
+                        out = out[:ea - a] + new + out[eb - a:]
+                    return out
+            idx = next(i for i, c in enumerate(all_cmds) if c["start"] == cmd["start"])
+            def chunk_of(c):
+                return text[byte_to_char[c["start"]]:byte_to_char[c["end"]]]
+            def reopen_text(open_chunk):
+                def sub(m):
+                    name = m.group(0)
+                    if name in ("in", "scoped", "hiding", "renaming"):
+                        return name
+                    cur = ".".join(n for k, n, _ in lib_depth if k == "namespace")
+                    for lib, con in restated.items():
+                        if lib in (f"{cur}.{name}", f"{pfx}.{name}"):
+                            return relative(con)
+                    return name
+                head, _, rest = open_chunk.partition("open")
+                return head + "open" + re.sub(r"(?<![\w.'])[A-Za-z_][\w'.]*(?![\w'])", sub, rest)
+            pending_attributes = []
+            for c in all_cmds[walked:idx]:
+                k = c["kind"]
+                if k == "Lean.Parser.Command.namespace":
+                    name = chunk_of(c).split()[1]
+                    full = ".".join([n for kk, n, _ in lib_depth if kk == "namespace"] + [name])
+                    scaffold = []
+                    if not full.startswith(pfx) and name != pfx:
+                        # a foreign namespace: its contents resolved relatively
+                        # there, so the concept opens it instead
+                        scaffold.append(("opentext", f"open {full}"))
+                    lib_depth.append(["namespace", name, scaffold])
+                elif k in ("Lean.Parser.Command.section", "Lean.Parser.Command.noncomputableSection"):
+                    parts = chunk_of(c).split()
+                    lib_depth.append(["section", parts[1] if len(parts) > 1 else "", []])
+                elif k == "Lean.Parser.Command.end":
+                    if lib_depth:
+                        lib_depth.pop()
+                elif k == "Lean.Parser.Command.open" and lib_depth:
+                    lib_depth[-1][2].append(("open", c))
+                elif k in ("Lean.Parser.Command.variable", "Lean.Parser.Command.universe") and lib_depth:
+                    lib_depth[-1][2].append(("scaffold", c))
+                elif k == "Lean.Parser.Command.attribute":
+                    a, b = byte_to_char[c["start"]], byte_to_char[c["end"]]
+                    if any(concept_of(n) and any(u[0] == u[2] and a <= at(u[0], u[1]) < b for u in r["usages"])
+                           for n, r in refs.items()):
+                        pending_attributes.append(c)
+            walked = idx + 1
+            # the chain of levels this declaration wants: the module namespace
+            # (standing for the library's root and any foreign namespace), the
+            # library's sections, and the nested namespaces the concept name
+            # keeps below the module namespace
+            first = sorted(v for v in cmd["restated_defs"].values() if v.startswith(cm + "."))[0]
+            rel_parts = first[len(cm) + 1:].split(".")[:-1]
+            desired = [["namespace", cm, []]]
+            for li, (k, n, scs) in enumerate(lib_depth):
+                if k == "section":
+                    desired.append(["section", n, [li]])
+                elif n in rel_parts:
+                    desired.append(["namespace", n, [li]])
+                else:
+                    desired[0][2].append(li)
+            common = 1
+            while common < min(len(emitted), len(desired)) and emitted[common][:2] == desired[common][:2]:
+                common += 1
+            while len(emitted) > common:
+                kind, name, _ = emitted.pop()
+                pieces.append(f"end {name}" if name else "end")
+            # open each missing level in turn, and after each level (open
+            # already or just opened) the scaffolding of its library levels
+            # not emitted yet: `variable` and `open` lines in library order
+            for i, (kind, name, sources) in enumerate(desired):
+                if i >= len(emitted):
+                    pieces.append(f"{kind} {name}" if name else kind)
+                    emitted.append([kind, name, {}])
+                level = emitted[i]
+                for li in sources:
+                    key = id(lib_depth[li][2])
+                    done = level[2].get(key, 0)
+                    for skind, c in lib_depth[li][2][done:]:
+                        if skind == "opentext":
+                            pieces.append(c)
+                            continue
+                        a, b = byte_to_char[c["start"]], byte_to_char[c["end"]]
+                        pieces.append(reopen_text(chunk_of(c)) if skind == "open" else patched(a, b, {}))
+                    level[2][key] = len(lib_depth[li][2])
+            for c in pending_attributes:
+                pieces.append(patched(byte_to_char[c["start"]], byte_to_char[c["end"]], {}))
+            # the command itself: the elaborated expansion of a library-defined
+            # command, or the source with its ids renamed and its uses patched
+            defs_here = cmd["restated_defs"]
+            # an unnamed instance the command declares: its library name is
+            # the build's, mapped under the command's namespace
+            lib_ns = ".".join(n for k, n, _ in lib_depth if k == "namespace")
+            inst_names = [con for lib, con in own.items()
+                          if lib.rpartition(".")[2].startswith("inst")
+                          and (lib in defs_here or lib.rpartition(".")[0] == lib_ns)
+                          and f"instance {relative(con)}" not in "\n".join(pieces)]
+            expansion = cmd.get("expansion")
+            if expansion and not cmd["kind"].startswith("Lean.Parser.Command."):
+                body = "\n\n".join(re.sub(r"(?<!^)(?<!\n)(?<!\s)(/--)", r"\n\1", e) for e in expansion)
+                for lib, con in sorted(defs_here.items(), key=lambda kv: -len(kv[0])):
+                    short_lib, short_con = lib.rpartition(".")[2], relative(con)
+                    body = body.replace(f"_root_.{lib}", short_con).replace(lib, short_con)
+                    if short_lib != short_con.rpartition(".")[2] and not short_lib.startswith("inst"):
+                        body = re.sub(r"(?<![\w.'])" + re.escape(short_lib) + r"(?![\w'])", short_con, body)
+                        notes.append(f"{cm}: the expansion declaring {lib} was renamed to {short_con} "
+                                     "by a word-level substitution; check it")
+                body = re.sub(r"\(([A-Za-z_][\w'.]*)\)\.", r"\1.", body)
+                body = re.sub(r"-/\n\n(\s*\|)", r"-/\n\1", body)
+            else:
+                a, b = byte_to_char[cmd["start"]], byte_to_char[cmd["end"]]
+                body = patched(a, b, defs_here, notation_uses.get(cmd["start"], []))
+            body = re.sub(r"^(\s*(?:/-.*?-/\s*)?(?:@\[[^\]]*\]\s*)*)protected\s+", r"\1", body, count=1, flags=re.S)
+            body = body.replace("_root_.", "")
+            m = re.search(r"\binstance(\s*(?:\([^)]*\)\s*)?):\s*([\w.]+)", body)
+            if m and inst_names:
+                cls = m.group(2).rpartition(".")[2].lower()
+                chosen = [c for c in inst_names if cls in c.lower()] or (inst_names if len(inst_names) == 1 else [])
+                if chosen:
+                    body = body[:m.start()] + f"instance {relative(chosen[0])}{m.group(1)}:" + body[m.end(1) + 1:]
+            m = re.search(r"\n\s*deriving\s+([^\n]+)$", body)
+            if m and not {c.strip() for c in m.group(1).split(",")} <= DERIVING_WHITELIST:
+                notes.append(f"{cm}: `deriving {m.group(1).strip()}` is outside the concept dialect's "
+                             "class list; write that instance by hand")
+            for old, new in ATTRIBUTE_SUBSTITUTES.items():
+                if re.search(r"@\[[^\]]*\b" + old + r"\b", body):
+                    body = re.sub(r"(@\[[^\]]*)\b" + old + r"\b", r"\1" + new, body)
+                    notes.append(f"{cm}: `@[{old}]` is not in the concept dialect; written as `@[{new}]`")
+            pieces.append(body)
+        while len(emitted) > 1:
+            kind, name, _ = emitted.pop()
+            pieces.append(f"end {name}" if name else "end")
+        pieces.append(f"end {cm}")
+        if opens:
+            pieces.insert(1, "open " + " ".join(sorted(opens)))
+            imports.extend(f"import {o}" for o in sorted(opens))
+        imports = list(dict.fromkeys(imports))
+        header = ("\n".join(imports) + "\n\n/-!\n---\ntitle: " + cm.split(".")[1] +
+                  "\ntype: definition\n---\nTODO: describe the notions this module restates.\n-/\n\n")
+        path = os.path.join(out_dir, cm.split(".")[1] + ".lean")
+        write(path, header + "\n\n".join(pieces) + "\n")
+        written.append(path)
+        for note in dict.fromkeys(notes):
+            print(f"skeleton note: {note}")
+    print(f"{len(written)} skeleton modules written under {out_dir}")
+
+
 def main():
     ap = argparse.ArgumentParser(description="export theorems of a Lean library as a Lax submission")
     ap.add_argument("config", help="the export's YAML description (see README)")
@@ -511,6 +814,9 @@ def main():
                     help="skip the check that the library's Lean and Mathlib are the environment's")
     ap.add_argument("--jobs", type=int, default=4, help="files elaborated in parallel (default 4)")
     ap.add_argument("--work", help="where the plans go (default: <out>/.plan)")
+    ap.add_argument("--skeleton", action="store_true",
+                    help="also write, under <out>/skeleton/, a draft concept module per module named in "
+                         "`restated`: the library's defining commands, renamed and patched, to start from")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -576,6 +882,16 @@ def main():
         if not os.path.isfile(path):
             return []
         return re.findall(r"^\s*declare_syntax_cat\s+([\w.']+)", open(path, encoding="utf-8").read(), re.M)
+
+    def list_commands_expanded(mod, extra):
+        """The command listing of `mod` with the uses of every notation the
+        modules in `extra` declare expanded; for the skeleton, which cannot
+        carry the library's notations."""
+        out = os.path.join(work, mod + ".expanded.commands.json")
+        if not os.path.isfile(out):
+            run(["lean", "--run", slice_lean, "commands", module_path(args.src, mod), out]
+                + sorted({f"mod:{m}" for m in extra}), args.src, env)
+        return json.load(open(out, encoding="utf-8"))
 
     def list_commands(mod, categories):
         out = os.path.join(work, mod + ".commands.json")
@@ -757,6 +1073,7 @@ def main():
                            r"eq_\d+|eq_def|ext|ext_iff|inj|injEq|ctorIdx|ofNat_ctorIdx|toCtorIdx|ofNat)$")
     concept_modules = sorted({".".join(v.split(".")[:2]) for v in restated.values()})
     substituted = {}            # library constant -> concept constant
+    restated_cmds = {}          # module -> the commands the concepts replace, in order
     for mod, (text, byte_to_char, refs, keep) in list(decisions.items()):
         defined = {n: r["definition"] for n, r in refs.items()
                    if r["module"] == mod and r.get("definition") and not n.startswith("_private.")}
@@ -781,9 +1098,11 @@ def main():
                 sys.exit(f"restated: the command declaring {n} in {mod} also declares {missing}, which "
                          f"must be restated too (map them in `restated`)")
             to_drop.add(i)
+            keep[i]["restated_defs"] = {m: restated_name(m) for m in siblings if restated_name(m)}
             for m in siblings:
                 substituted[m] = restated_name(m) or m
         if to_drop:
+            restated_cmds[mod] = [keep[i] for i in sorted(to_drop)]
             decisions[mod] = (text, byte_to_char, refs, [c for i, c in enumerate(keep) if i not in to_drop])
             stats["restated_dropped"] = stats.get("restated_dropped", 0) + len(to_drop)
     all_defined = {n for m, (_, _, refs, _) in decisions.items()
@@ -1123,6 +1442,11 @@ def main():
         new_mod = f"{pname}.{mod}"
         write(os.path.join(args.out, "proofs", *new_mod.split(".")) + ".lean", body + "\n")
         stats["lines"] += body.count("\n") + 1
+    if args.skeleton:
+        notation_mods = {m for m, d in commands.items()
+                         if any(c["kind"] in META for c in d["commands"])}
+        write_skeletons(args, cname, pfx, restated, restated_cmds, decisions, commands, imports_of, below,
+                        lambda mod: list_commands_expanded(mod, notation_mods))
     modules = sorted(vendored)
     print(f"{len(modules)} modules written: kept {stats['kept']} declaration commands, dropped {stats['dropped']}, "
           f"{stats['lines']} lines, {stats['instances']} silent declarations kept, {stats['expanded']} commands expanded, "

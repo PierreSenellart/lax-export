@@ -196,6 +196,13 @@ unsafe def commandsMode (file outPath : String) (categories : List String) : IO 
     let ctx : Elab.Command.Context := { fileName := file, fileMap := inputCtx.fileMap,
                                         snap? := none, cancelTk? := none }
     let ref ← IO.mkRef s.commandState
+    -- a `scoped notation` is active only inside its namespace, which the
+    -- file's final `end` closed: reopen the root namespace of every module
+    -- whose notations are to be expanded, so that their macros fire
+    for m in mods do
+      match Parser.runParserCategory s.commandState.env `command s!"open {m.getRoot}" with
+      | .ok stx => discard <| ((Elab.Command.elabCommand stx) ctx ref).toBaseIO
+      | .error e => IO.eprintln s!"cannot open {m.getRoot}: {e}"
     for tree in s.commandState.infoState.trees do
       for (p, q, use) in usesOf isLibraryKind tree #[] do
         match ← ((expandLibrary isLibraryKind use) ctx ref).toBaseIO with

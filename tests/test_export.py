@@ -70,7 +70,7 @@ def submission(tmp_path_factory):
         f"theorem holds : 1 + 1 = 2 := by\n  have := Lax{ID}Proofs.Fixture.rooted\n  rfl\n\nend Lax{ID}Proofs\n")
     cache = tmp_path_factory.mktemp("cache")
     r = run([sys.executable, os.path.join(ROOT, "lax_export.py"), os.path.join(FIXTURE, "export.yaml"),
-             "--out", str(out), "--cache", str(cache), "--no-environment-check"], ROOT)
+             "--out", str(out), "--cache", str(cache), "--no-environment-check", "--skeleton"], ROOT)
     (out / "export.log").write_text(r.stderr)
     return out
 
@@ -85,6 +85,13 @@ def test_layout_and_manifest(submission):
     roots = (submission / "proofs" / f"Lax{ID}Proofs.lean").read_text()
     assert f"import Lax{ID}Proofs.Bridge" in roots
     assert (submission / "concepts" / f"Lax{ID}.lean").read_text() == f"import Lax{ID}.Box\nimport Lax{ID}.Main\n"
+
+
+def test_skeleton(submission):
+    box = (submission / "skeleton" / f"Lax{ID}" / "Box.lean").read_text()
+    assert f"namespace Lax{ID}.Box" in box and "structure Box where\n  val : Nat" in box
+    assert "title: Box" in box                                        # the frontmatter stub
+    assert "unused_lemma" not in box and "secret" not in box          # only the restated declaration
 
 
 def test_slicing(submission):
