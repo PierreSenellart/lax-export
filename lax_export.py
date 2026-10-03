@@ -499,6 +499,16 @@ def attribute_generated(name, ranged):
 
 ATTRIBUTE_SUBSTITUTES = {"instance_reducible": "reducible"}
 
+# the last component of a constant Lean generates beside a declaration
+GENERATED_SUFFIX = re.compile(
+    r"\.(rec|recOn|casesOn|noConfusion|noConfusionType|below|brecOn|binductionOn|ibelow|inj|injEq|"
+    r"sizeOf_spec|match_\d+|proof_\d+|eq_\d+|_sunfold|_unsafe_rec|ctorIdx|toCtorIdx|ofNat|_aux_\d+|_f|"
+    r"splitter|mk\.inj|mk\.injEq)$")
+
+# attributes whose generated lemmas the ilean records at the attribute's own
+# token rather than at an identifier
+GENERATING_ATTRIBUTES = {"simps", "simps!", "simps?", "to_additive", "ext"}
+
 
 def printed_forms(lib, pfx):
     """The spellings a pretty-printer may use for the constant `lib`: in full,
@@ -949,146 +959,178 @@ def main():
     targets = set(args.target)
     commands = {}
     full = set()                    # modules vendored in full: only with --whole-modules
-    for round_ in range(4):
-        cl = run_closure(targets)
-        own = [c for c in cl["constants"] if c["own"]]
-        ranged = {c["name"]: c for c in own if c["range"]}
-        selected = set(ranged)
-        unattributed = []
-        for c in own:
-            if c["range"]:
-                continue
-            p = attribute_generated(c["name"], ranged)
-            if p:
-                selected.add(p)
-            else:
-                unattributed.append(c["name"])
-        touched = set(cl["modules"]) | {c["module"] for c in own}
-        all_mods = import_closure(touched)
-        category_mods = {m: categories_of(m) for m in all_mods}
-        categories = sorted({f"cat:{c}" for cs in category_mods.values() for c in cs}
-                            | {f"mod:{m}" for m, cs in category_mods.items() if cs})
-        with ThreadPoolExecutor(max_workers=args.jobs) as ex:
-            for mod, d in ex.map(lambda m: list_commands(m, categories), sorted(all_mods - set(commands))):
-                commands[mod] = d
-        # what the library's notations and macros rest on: the constants their
-        # defining commands mention (helper functions a `macro_rules` body
-        # calls, say) become targets, so that the closure brings them in; a
-        # module declaring a category is left out, its parsers being dropped
-        # and the uses expanded instead
-        if args.whole_modules:
-            full = set(all_mods)
-        extra = set()
-        for m in all_mods:
-            if category_mods[m] or args.whole_modules:
-                continue
-            meta = [c for c in commands[m]["commands"] if c["kind"] in META]
-            if not meta:
-                continue
-            d = ilean(args.build, m)
-            for n, r in d.items():
-                if not r["module"].startswith(pfx) or n.startswith("_private."):
+    for _outer in range(6):
+        silent_cmds = []
+        for round_ in range(4):
+            cl = run_closure(targets)
+            own = [c for c in cl["constants"] if c["own"]]
+            ranged = {c["name"]: c for c in own if c["range"]}
+            selected = set(ranged)
+            unattributed = []
+            for c in own:
+                if c["range"]:
                     continue
-                for u in r["usages"]:
-                    if any(c["line"] <= u[0] + 1 <= c["endLine"] for c in meta):
-                        extra.add(n); break
-        extra = {n for n in extra if n not in targets}
+                p = attribute_generated(c["name"], ranged)
+                if p:
+                    selected.add(p)
+                else:
+                    unattributed.append(c["name"])
+            touched = set(cl["modules"]) | {c["module"] for c in own}
+            all_mods = import_closure(touched)
+            category_mods = {m: categories_of(m) for m in all_mods}
+            categories = sorted({f"cat:{c}" for cs in category_mods.values() for c in cs}
+                                | {f"mod:{m}" for m, cs in category_mods.items() if cs})
+            with ThreadPoolExecutor(max_workers=args.jobs) as ex:
+                for mod, d in ex.map(lambda m: list_commands(m, categories), sorted(all_mods - set(commands))):
+                    commands[mod] = d
+            # what the library's notations and macros rest on: the constants their
+            # defining commands mention (helper functions a `macro_rules` body
+            # calls, say) become targets, so that the closure brings them in; a
+            # module declaring a category is left out, its parsers being dropped
+            # and the uses expanded instead
+            if args.whole_modules:
+                full = set(all_mods)
+            extra = set()
+            for m in all_mods:
+                if category_mods[m] or args.whole_modules:
+                    continue
+                meta = [c for c in commands[m]["commands"] if c["kind"] in META]
+                if not meta:
+                    continue
+                d = ilean(args.build, m)
+                for n, r in d.items():
+                    if not r["module"].startswith(pfx) or n.startswith("_private."):
+                        continue
+                    for u in r["usages"]:
+                        if any(c["line"] <= u[0] + 1 <= c["endLine"] for c in meta):
+                            extra.add(n); break
+            extra = {n for n in extra if n not in targets}
+            if not extra:
+                break
+            print(f"round {round_ + 1}: {len(extra)} declarations the library's notations rest on added as targets",
+                  file=sys.stderr)
+            targets |= extra
+        for a in cl["axioms"]:
+            if a["target"] in args.target:
+                print(f"{a['target']}: axioms {a['axioms']}", file=sys.stderr)
+        if unattributed:
+            print(f"warning: {len(unattributed)} generated constants without a parent declaration, "
+                  f"e.g. {unattributed[:5]}", file=sys.stderr)
+        by_mod = {}
+        for n in selected:
+            c = ranged[n]
+            by_mod.setdefault(c["module"], []).append((c["range"]["line"], c["range"]["endLine"], n))
+        print(f"{len(selected)} declarations selected; {len(all_mods)} modules in the import closure",
+              file=sys.stderr)
+        for mod, d in commands.items():
+            if d["errors"]:
+                print(f"warning: {mod}: {len(d['errors'])} elaboration errors, first: {d['errors'][0][:200]}", file=sys.stderr)
+
+        prefix_rewrite = rewriter(pfx, f"{pname}.{pfx}")
+        header_opts = "".join(f"set_option {o}\n" for o in args.set_option)
+
+        # 2. decide, per module of the import closure, which commands to keep
+        silent_re = re.compile(
+            r"^\s*(?:/-[-!]?.*?-/\s*)?(?:(?:omit|include|open)\b[^\n]*?\bin\s+)*(?P<attrs>(?:@\[[^\]]*\]\s*)*)"
+            r"(?:noncomputable\s+|protected\s+|private\s+|scoped\s+|local\s+|unsafe\s+)*"
+            r"(?P<kw>instance|theorem|lemma|def|abbrev)\b", re.S)
+        silent_attrs = re.compile(r"\b(simp|simps|ext|norm_cast|refl|trans|symm|aesop|coe|reducible|instance)\b")
+        stats = {"kept": 0, "dropped": 0, "lines": 0, "patched": 0, "unpatched": [], "instances": 0, "expanded": 0}
+        decisions = {}            # module -> (text, byte_to_char, refs, keep list)
+        ilean_cache = {}
+        for mod in sorted(all_mods):
+            src_path = module_path(args.src, mod)
+            data = open(src_path, "rb").read()
+            text = data.decode("utf-8")
+            byte_to_char = {}
+            b = 0
+            for i, ch in enumerate(text):
+                byte_to_char[b] = i
+                b += len(ch.encode("utf-8"))
+            byte_to_char[b] = len(text)
+            refs = ilean(args.build, mod)
+            uses_by_line = {}
+            for n, r in refs.items():
+                if r["module"].startswith(pfx):
+                    for u in r["usages"]:
+                        uses_by_line.setdefault(u[0] + 1, []).append((n, u))
+            wanted = by_mod.get(mod, [])
+            def overlaps(cmd):
+                return any(not (e < cmd["line"] or s > cmd["endLine"]) for s, e, _ in wanted)
+            def declared_by_kept(n):
+                """`n` is declared by a kept command although the closure never
+                reached it: a field or constructor of a selected structure, say,
+                whose projection a silent instance mentions."""
+                m = refs[n]["module"]
+                dfn = refs[n].get("definition") if m == mod else \
+                    ilean_cache.setdefault(m, ilean(args.build, m)).get(n, {}).get("definition")
+                if not dfn:
+                    return False
+                return any(s <= dfn[0] + 1 <= e for s, e, _ in by_mod.get(m, []))
+            def mentions_unselected(cmd):
+                for ln in range(cmd["line"], cmd["endLine"] + 1):
+                    for n, _ in uses_by_line.get(ln, []):
+                        if n not in selected and not declared_by_kept(n):
+                            return True
+                return False
+            def is_silent(cmd):
+                a, b = byte_to_char[cmd["start"]], byte_to_char[cmd["end"]]
+                m = silent_re.match(text[a:b])
+                if not m:
+                    return False
+                return m.group("kw") == "instance" or bool(silent_attrs.search(m.group("attrs") or ""))
+            keep, content = [], False
+            drops_syntax = bool(category_mods.get(mod))
+            for cmd in commands[mod]["commands"]:
+                k = cmd["kind"]
+                if k == "header":
+                    keep.append(cmd); continue
+                if drops_syntax and (k in META or k == "Lean.Parser.Command.syntaxCat"):
+                    stats["dropped"] += 1; continue
+                if mod in full:
+                    keep.append(cmd); content = True; continue
+                if k in SCAFFOLD:
+                    if k in CHECKED and mentions_unselected(cmd):
+                        stats["dropped"] += 1; continue
+                    keep.append(cmd); continue
+                if overlaps(cmd):
+                    keep.append(cmd); stats["kept"] += 1; content = True
+                elif is_silent(cmd) and not mentions_unselected(cmd):
+                    keep.append(cmd); stats["instances"] += 1; content = True
+                    silent_cmds.append((mod, cmd))
+                else:
+                    stats["dropped"] += 1
+            if content:
+                decisions[mod] = (text, byte_to_char, refs, keep)
+        # a silent instance kept by its shape may rest on declarations the
+        # closure never reached (the instance for bounded formulas behind the
+        # one for formulas, say): make them targets and select again
+        extra = set()
+        for mod, cmd in silent_cmds:
+            refs = decisions[mod][2]
+            for n, r in refs.items():
+                d = r.get("definition")
+                if (d and r["module"] == mod and cmd["line"] <= d[0] + 1 <= cmd["endLine"]
+                        and n not in selected and n not in targets and not n.startswith("_private.")):
+                    extra.add(n)
+        # a kept command may name a declaration its proof term does not use
+        # (a lemma in a `simp only` list that fired on nothing, say): the
+        # module must still declare it
+        for mod, (_, _, refs, keep) in decisions.items():
+            for cmd in keep:
+                if cmd["kind"] == "header" or cmd["kind"] in SCAFFOLD:
+                    continue
+                for n, r in refs.items():
+                    if (not r["module"].startswith(pfx) or n in selected or n in targets
+                            or n.startswith("_private.") or GENERATED_SUFFIX.search(n)):
+                        continue
+                    if any(cmd["line"] <= u[0] + 1 <= cmd["endLine"] for u in r["usages"]):
+                        extra.add(n)
         if not extra:
             break
-        print(f"round {round_ + 1}: {len(extra)} declarations the library's notations rest on added as targets",
-              file=sys.stderr)
+        print(f"{len(extra)} declarations kept commands rest on were never reached by the closure: "
+              "selecting again", file=sys.stderr)
         targets |= extra
-    for a in cl["axioms"]:
-        if a["target"] in args.target:
-            print(f"{a['target']}: axioms {a['axioms']}", file=sys.stderr)
-    if unattributed:
-        print(f"warning: {len(unattributed)} generated constants without a parent declaration, "
-              f"e.g. {unattributed[:5]}", file=sys.stderr)
-    by_mod = {}
-    for n in selected:
-        c = ranged[n]
-        by_mod.setdefault(c["module"], []).append((c["range"]["line"], c["range"]["endLine"], n))
-    print(f"{len(selected)} declarations selected; {len(all_mods)} modules in the import closure",
-          file=sys.stderr)
-    for mod, d in commands.items():
-        if d["errors"]:
-            print(f"warning: {mod}: {len(d['errors'])} elaboration errors, first: {d['errors'][0][:200]}", file=sys.stderr)
-
-    prefix_rewrite = rewriter(pfx, f"{pname}.{pfx}")
-    header_opts = "".join(f"set_option {o}\n" for o in args.set_option)
-
-    # 2. decide, per module of the import closure, which commands to keep
-    silent_re = re.compile(
-        r"^\s*(?:/-[-!]?.*?-/\s*)?(?P<attrs>(?:@\[[^\]]*\]\s*)*)"
-        r"(?:noncomputable\s+|protected\s+|private\s+|scoped\s+|local\s+|unsafe\s+)*"
-        r"(?P<kw>instance|theorem|lemma|def|abbrev)\b", re.S)
-    silent_attrs = re.compile(r"\b(simp|simps|ext|norm_cast|refl|trans|symm|aesop|coe|reducible|instance)\b")
-    stats = {"kept": 0, "dropped": 0, "lines": 0, "patched": 0, "unpatched": [], "instances": 0, "expanded": 0}
-    decisions = {}            # module -> (text, byte_to_char, refs, keep list)
-    ilean_cache = {}
-    for mod in sorted(all_mods):
-        src_path = module_path(args.src, mod)
-        data = open(src_path, "rb").read()
-        text = data.decode("utf-8")
-        byte_to_char = {}
-        b = 0
-        for i, ch in enumerate(text):
-            byte_to_char[b] = i
-            b += len(ch.encode("utf-8"))
-        byte_to_char[b] = len(text)
-        refs = ilean(args.build, mod)
-        uses_by_line = {}
-        for n, r in refs.items():
-            if r["module"].startswith(pfx):
-                for u in r["usages"]:
-                    uses_by_line.setdefault(u[0] + 1, []).append((n, u))
-        wanted = by_mod.get(mod, [])
-        def overlaps(cmd):
-            return any(not (e < cmd["line"] or s > cmd["endLine"]) for s, e, _ in wanted)
-        def declared_by_kept(n):
-            """`n` is declared by a kept command although the closure never
-            reached it: a field or constructor of a selected structure, say,
-            whose projection a silent instance mentions."""
-            m = refs[n]["module"]
-            dfn = refs[n].get("definition") if m == mod else \
-                ilean_cache.setdefault(m, ilean(args.build, m)).get(n, {}).get("definition")
-            if not dfn:
-                return False
-            return any(s <= dfn[0] + 1 <= e for s, e, _ in by_mod.get(m, []))
-        def mentions_unselected(cmd):
-            for ln in range(cmd["line"], cmd["endLine"] + 1):
-                for n, _ in uses_by_line.get(ln, []):
-                    if n not in selected and not declared_by_kept(n):
-                        return True
-            return False
-        def is_silent(cmd):
-            a, b = byte_to_char[cmd["start"]], byte_to_char[cmd["end"]]
-            m = silent_re.match(text[a:b])
-            if not m:
-                return False
-            return m.group("kw") == "instance" or bool(silent_attrs.search(m.group("attrs") or ""))
-        keep, content = [], False
-        drops_syntax = bool(category_mods.get(mod))
-        for cmd in commands[mod]["commands"]:
-            k = cmd["kind"]
-            if k == "header":
-                keep.append(cmd); continue
-            if drops_syntax and (k in META or k == "Lean.Parser.Command.syntaxCat"):
-                stats["dropped"] += 1; continue
-            if mod in full:
-                keep.append(cmd); content = True; continue
-            if k in SCAFFOLD:
-                if k in CHECKED and mentions_unselected(cmd):
-                    stats["dropped"] += 1; continue
-                keep.append(cmd); continue
-            if overlaps(cmd):
-                keep.append(cmd); stats["kept"] += 1; content = True
-            elif is_silent(cmd) and not mentions_unselected(cmd):
-                keep.append(cmd); stats["instances"] += 1; content = True
-            else:
-                stats["dropped"] += 1
-        if content:
-            decisions[mod] = (text, byte_to_char, refs, keep)
     vendored = set(decisions)
 
     # Declarations the concepts restate verbatim (`restated`): the library's
@@ -1107,6 +1149,21 @@ def main():
             restated[k] = v
         else:
             restated[k] = f"{cname}.{v}"
+    # a restated declaration under the namespace of a declaration another
+    # package restates (`TMData.AcceptsU` here, `TMData` in the core): field
+    # notation on the other package's type looks it up in that package's
+    # namespace, so each vendored module using it gets an alias there
+    cross_aliases = {}            # namespace to alias into -> {namespace aliased: shorts}
+    for _n, _con in restated.items():
+        _parents = [l for l in restated if l != _n and _n.startswith(l + ".")]
+        if not _parents:
+            continue
+        _lib = max(_parents, key=len)
+        _rest = _n[len(_lib) + 1:]
+        _expected = restated[_lib] + ("." + _rest.rpartition(".")[0] if "." in _rest else "")
+        _con_ns, _short = _con.rpartition(".")[0], _con.rpartition(".")[2]
+        if _con_ns != _expected:
+            cross_aliases.setdefault(_expected, {}).setdefault(_con_ns, set()).add((_n, _short))
     def within(n, lib):
         return n == lib or n.startswith(lib + ".")
     def mapped_under(n):
@@ -1191,6 +1248,15 @@ def main():
         if n in substituted:
             return substituted[n]
         return restated_name(n) if n not in all_defined else None
+    def case_alternative(a):
+        """The token at `a` names an alternative of `cases … with | old => …`
+        or a `match` arm, where only a constructor's short name is legal:
+        left as written."""
+        ls = text.rfind("\n", 0, a) + 1
+        le = text.find("\n", a)
+        le = len(text) if le == -1 else le
+        return re.search(r"\|\s*$", text[ls:a]) is not None and "=>" in text[a:le]
+
     def field_binder(a, b, n):
         """`state := …` or `relFormula R t := …` in a structure instance
         names a field, not a use: a bare field name opening its line (or
@@ -1199,8 +1265,15 @@ def main():
         if "." in tok or not (n.rpartition(".")[0] in substituted or n.rpartition(".")[0] in foreign):
             return False
         before = text[text.rfind("\n", 0, a) + 1:a]
-        after = text[b:text.find("\n", b) if text.find("\n", b) >= 0 else len(text)]
-        return re.search(r"(?:^|[{,])\s*$", before) is not None and ":=" in after
+        nl = text.find("\n", b)
+        after = text[b:nl if nl >= 0 else len(text)]
+        if re.search(r"(?:^|[{,])\s*$", before) is None:
+            return False
+        if ":=" in after:
+            return True
+        # a field given by match alternatives: `arity` alone on its line,
+        # the alternatives `| .elt => 1` following
+        return after.strip() == "" and nl >= 0 and re.match(r"\s*\|", text[nl + 1:nl + 200]) is not None
 
     # foreign-namespace constants: declared by a kept command of a vendored
     # module, outside the prefix, not private; the earlier set from the
@@ -1276,7 +1349,7 @@ def main():
                 tok = text[a:b]
                 if not (n == tok or n.endswith("." + tok)) or (a > 0 and text[a - 1] == "."):
                     continue
-                if field_binder(a, b, n):
+                if field_binder(a, b, n) or case_alternative(a):
                     continue
                 patches.append((a, b, new))
         # a kept library declaration under a restated namespace, a theorem about
@@ -1312,7 +1385,7 @@ def main():
                     # left as written, resolved through the `export` alias
                     stats["aliased"] = stats.get("aliased", 0) + 1
                     continue
-                if field_binder(a, b, n):
+                if field_binder(a, b, n) or case_alternative(a):
                     continue
                 patches.append((a, b, new))
             d = r.get("definition")
@@ -1330,9 +1403,11 @@ def main():
                     patches.append((a, b, f"_root_.{new}"))
                     ns, _, short = n.rpartition(".")
                     exports.setdefault(ns, {})[short] = a
-                elif tok == "instance" or not re.fullmatch(r"[\w.'«»]+", tok):
-                    # an unnamed instance (named below) or a declaration
-                    # without an id of its own: nothing to patch
+                elif tok == "instance" or tok in GENERATING_ATTRIBUTES or not re.fullmatch(r"[\w.'«»]+", tok):
+                    # an unnamed instance (named below), a lemma an attribute
+                    # generated (`@[simps]` records its lemmas at the
+                    # attribute's token), or a declaration without an id of
+                    # its own: nothing to patch
                     pass
                 else:
                     # a declaration id that does not read as its constant's
@@ -1535,6 +1610,24 @@ def main():
                     if f"import {cm}" not in lines:
                         lines.append(f"import {cm}")
                 chunk = "\n".join(lines)
+                # `export` needs its source namespace registered, which a
+                # `_root_`-named declaration does not do and which `namespace`
+                # does only relative to the current one: register at the top,
+                # where the module is still at the root
+                register = {pns for shorts in aliases.values() for _, pns in shorts.values()}
+                register |= {f"{pname}.Foreign.{ns}" for ns in exports}
+                cross_blocks = []
+                for _ns, _by in cross_aliases.items():
+                    for _con_ns, _pairs in _by.items():
+                        _used = sorted({sh for n, sh in _pairs if n in refs})
+                        if _used:
+                            register.add(_con_ns)
+                            cross_blocks.append(f"namespace {_ns}\nexport {_con_ns} ({' '.join(_used)})\nend {_ns}")
+                            stats["aliased"] = stats.get("aliased", 0) + len(_used)
+                for r in sorted(register):
+                    chunk += f"\n\nnamespace {r}\nend {r}"
+                for blk in cross_blocks:
+                    chunk += "\n\n" + blk
             pieces.append(chunk)
             pieces.extend(alias_lines)
         body = "\n\n".join(pieces)
