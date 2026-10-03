@@ -800,14 +800,19 @@ def write_skeletons(args, cname, pfx, restated, restated_cmds, decisions, comman
                 body = patched(a, b, defs_here, notation_uses.get(cmd["start"], []))
             body = re.sub(r"^(\s*(?:/-.*?-/\s*)?(?:@\[[^\]]*\]\s*)*)protected\s+", r"\1", body, count=1, flags=re.S)
             body = body.replace("_root_.", "")
-            m = re.search(r"\binstance(\s*(?:\([^)]*\)\s*)?):\s*([\w.]+)(?:\s+([\w.]+))?", body)
+            # the `instance` keyword at the head of a command line, never the
+            # word inside a docstring ("a packaged instance: pages, ...")
+            m = re.search(r"(?m)^(?P<pre>[ \t]*(?:@\[[^\]]*\][ \t]*)*"
+                          r"(?:(?:noncomputable|protected|private|scoped|local)\s+)*)"
+                          r"instance(?P<bind>\s*(?:\([^)]*\)\s*)?):\s*(?P<cls>[\w.]+)(?:\s+(?P<arg>[\w.]+))?", body)
             if m and inst_names:
-                cls = m.group(2).rpartition(".")[2].lower()
-                arg = (m.group(3) or "").rpartition(".")[2].lower()
+                cls = m.group("cls").rpartition(".")[2].lower()
+                arg = (m.group("arg") or "").rpartition(".")[2].lower()
                 chosen = [c for c in inst_names if cls in c.lower() and (not arg or arg in c.lower())] \
                     or [c for c in inst_names if cls in c.lower()] or (inst_names if len(inst_names) == 1 else [])
                 if chosen:
-                    body = body[:m.start()] + f"instance {relative(chosen[0])}{m.group(1)}:" + body[m.end(1) + 1:]
+                    body = body[:m.start()] + m.group("pre") + f"instance {relative(chosen[0])}{m.group('bind')}:" \
+                        + body[m.end("bind") + 1:]
             m = re.search(r"\n\s*deriving\s+([^\n]+)$", body)
             if m and not {c.strip() for c in m.group(1).split(",")} <= DERIVING_WHITELIST:
                 notes.append(f"{cm}: `deriving {m.group(1).strip()}` is outside the concept dialect's "
@@ -1020,6 +1025,7 @@ def main():
     silent_attrs = re.compile(r"\b(simp|simps|ext|norm_cast|refl|trans|symm|aesop|coe|reducible|instance)\b")
     stats = {"kept": 0, "dropped": 0, "lines": 0, "patched": 0, "unpatched": [], "instances": 0, "expanded": 0}
     decisions = {}            # module -> (text, byte_to_char, refs, keep list)
+    ilean_cache = {}
     for mod in sorted(all_mods):
         src_path = module_path(args.src, mod)
         data = open(src_path, "rb").read()
@@ -1039,10 +1045,20 @@ def main():
         wanted = by_mod.get(mod, [])
         def overlaps(cmd):
             return any(not (e < cmd["line"] or s > cmd["endLine"]) for s, e, _ in wanted)
+        def declared_by_kept(n):
+            """`n` is declared by a kept command although the closure never
+            reached it: a field or constructor of a selected structure, say,
+            whose projection a silent instance mentions."""
+            m = refs[n]["module"]
+            dfn = refs[n].get("definition") if m == mod else \
+                ilean_cache.setdefault(m, ilean(args.build, m)).get(n, {}).get("definition")
+            if not dfn:
+                return False
+            return any(s <= dfn[0] + 1 <= e for s, e, _ in by_mod.get(m, []))
         def mentions_unselected(cmd):
             for ln in range(cmd["line"], cmd["endLine"] + 1):
                 for n, _ in uses_by_line.get(ln, []):
-                    if n not in selected:
+                    if n not in selected and not declared_by_kept(n):
                         return True
             return False
         def is_silent(cmd):
