@@ -1184,6 +1184,26 @@ def main():
                     silent_cmds.append((mod, cmd))
                 else:
                     stats["dropped"] += 1
+            # a `variable` no kept declaration follows within its section or
+            # namespace binds nothing, and may name a binder of a `variable`
+            # that was dropped: it goes too
+            OPENERS = ("Lean.Parser.Command.namespace", "Lean.Parser.Command.section",
+                       "Lean.Parser.Command.noncomputableSection")
+            def binds_nothing(i):
+                level = 0
+                for c in keep[i + 1:]:
+                    if c["kind"] in OPENERS:
+                        level += 1
+                    elif c["kind"] == "Lean.Parser.Command.end":
+                        level -= 1
+                        if level < 0:
+                            return True
+                    elif c["kind"] in NOTATION_KINDS or (c["kind"] not in SCAFFOLD and c["kind"] != "header"):
+                        return False            # a local notation may name the variable too
+                return True
+            if mod not in full:
+                keep = [c for i, c in enumerate(keep)
+                        if not (c["kind"] == "Lean.Parser.Command.variable" and binds_nothing(i))]
             if content:
                 decisions[mod] = (text, byte_to_char, refs, keep)
         # a silent instance kept by its shape may rest on declarations the
