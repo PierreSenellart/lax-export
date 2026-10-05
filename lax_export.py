@@ -508,6 +508,74 @@ CHECKED = {"Lean.Parser.Command.variable", "Lean.Parser.Command.attribute",
            "Lean.Parser.Command.notation", "Lean.Parser.Command.macro_rules"}
 
 
+def receiver_position(signature, type_name):
+    """Which explicit argument of a declaration is its receiver in field
+    notation: the first whose type mentions `type_name`. `signature` is the
+    declaration's text from just after its name. Explicit binders are counted
+    first, then the arguments of the type after the colon; with no mention at
+    all the receiver is a section variable, taken to come first."""
+    mention = re.compile(r"(?<![\w.'])" + re.escape(type_name) + r"(?![\w'])")
+    i, count = 0, 0
+    closing = {"(": ")", "{": "}", "[": "]", "⦃": "⦄"}
+    while i < len(signature):
+        ch = signature[i]
+        if ch.isspace():
+            i += 1
+        elif ch in closing:
+            depth, j = 1, i + 1
+            while j < len(signature) and depth:
+                depth += (signature[j] == ch) - (signature[j] == closing[ch])
+                j += 1
+            group = signature[i + 1:j - 1]
+            if ch == "(":
+                names, _, typ = group.partition(":")
+                if mention.search(typ):
+                    return count
+                count += len(names.split())
+            i = j
+        else:
+            break
+    if i < len(signature) and signature[i] == ":":
+        result = re.split(r":=|\n\s*\||\bwhere\b", signature[i + 1:], 1)[0]
+        depth, part, parts = 0, "", []
+        for ch in result:
+            depth += (ch in "([{⟨") - (ch in ")]}⟩")
+            if ch == "→" and depth == 0:
+                parts.append(part)
+                part = ""
+            else:
+                part += ch
+        for k, arg in enumerate(parts):
+            if mention.search(arg):
+                return count + k
+    return 0
+
+
+def leading_arguments(text, i, n):
+    """The `n` application arguments written from position `i`, and where
+    they end; `(None, i)` when they cannot be read off the text."""
+    closing = {"(": ")", "[": "]", "{": "}", "⟨": "⟩"}
+    args = []
+    for _ in range(n):
+        while i < len(text) and text[i] in " \t":
+            i += 1
+        if i >= len(text):
+            return None, i
+        if text[i] in closing:
+            op, depth, j = text[i], 1, i + 1
+            while j < len(text) and depth:
+                depth += (text[j] == op) - (text[j] == closing[op])
+                j += 1
+        else:
+            m = re.match(r"[^\s()\[\]{}⟨⟩,;:=]+", text[i:])
+            if not m:
+                return None, i
+            j = i + m.end()
+        args.append(text[i:j])
+        i = j
+    return args, i
+
+
 def run(cmd, cwd, env):
     r = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True)
     if r.returncode:
@@ -1493,8 +1561,9 @@ def main():
                              else f"{pname}.Foreign{'.' + n.rpartition('.')[0] if n.rpartition('.')[0] else ''}")
                 aliases.setdefault(ns_concept, {})[short] = (at(d[0], d[1]), proofs_ns)
                 # the alias exists only after the declaration: a recursive call
-                # written in field notation inside it (`M.posSeq t j` in the
-                # body of `posSeq`) is written as an application instead
+                # written in field notation inside it (`e.Holds val` in the
+                # body of `Holds`) is written as an application instead, the
+                # receiver going where the declaration takes it
                 own = next((c for c in keep if c["kind"] != "header"
                             and c["line"] <= d[0] + 1 <= c["endLine"]), None)
                 for u in r["usages"] if own else []:
@@ -1513,8 +1582,13 @@ def main():
                         continue
                     # `Ns.f` naming the declaration through its namespace is
                     # not a field access, and is patched as a name
-                    if re.fullmatch(r"[\w'₀-₉]+", recv) and not n.endswith(f".{recv}.{short}"):
-                        patches.append((start, ub, f"({short} {recv})"))
+                    if not re.fullmatch(r"[\w'₀-₉]+", recv) or n.endswith(f".{recv}.{short}"):
+                        continue
+                    pos = receiver_position(text[at(d[2], d[3]):byte_to_char[own["end"]]],
+                                            lib.rpartition(".")[2])
+                    before, end = leading_arguments(text, ub, pos)
+                    if before is not None:
+                        patches.append((start, end, "(" + " ".join([short] + before + [recv]) + ")"))
         for n in foreign:
             r = refs.get(n)
             if not r:
