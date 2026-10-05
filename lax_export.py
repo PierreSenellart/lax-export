@@ -519,12 +519,32 @@ def module_path(src, mod):
     return os.path.join(src, *mod.split(".")) + ".lean"
 
 
+LIB_PREFIX = None       # the library's namespace, set once the configuration is read
+RESTATED_LIB = set()    # the library declarations the concepts restate, likewise
+MANGLED = {}            # written name -> mangled name, of the private declarations demangled
+
+
 def demangle(name):
-    """A private declaration by the name it is written with: Lean mangles
-    `private def Why.zsf` of module `M` into `_private.M.0.Why.zsf`, and a
-    vendored copy, rooted under the package like every other library name,
-    is no longer private."""
-    return re.sub(r"^_private\..*?\.0\.", "", name)
+    """A private declaration outside the library's namespace by the name it
+    is written with: Lean mangles `private def Why.zsf` of module `M` into
+    `_private.M.0.Why.zsf`, and a vendored copy, rooted under the package
+    like every other library name, is no longer private. A private
+    declaration under the library's namespace keeps its mangled name and
+    stays private: its vendored copy is under the package already, and two
+    modules may each have their own `private def Lib.aux`. The exception is
+    a private declaration under a restated one, `private def Lib.Spec.pad`
+    used as `spec.pad`: field notation on the concept's type finds it only
+    through an alias, which a private name cannot have."""
+    m = re.match(r"^_private\..*?\.0\.(.*)$", name)
+    if not m:
+        return name
+    inner = m.group(1)
+    parts = inner.split(".")
+    if not any(".".join(parts[:i]) in RESTATED_LIB for i in range(1, len(parts))):
+        if LIB_PREFIX and (inner == LIB_PREFIX or inner.startswith(LIB_PREFIX + ".")):
+            return name
+    MANGLED[inner] = name
+    return inner
 
 
 def ilean(build, mod):
@@ -536,7 +556,8 @@ def ilean(build, mod):
     for k, v in d["references"].items():
         c = json.loads(k)["c"]
         out[demangle(c["n"])] = {"module": c["m"], "definition": v.get("definition"),
-                                 "usages": v.get("usages", [])}
+                                 "usages": v.get("usages", []),
+                                 "unprivate": demangle(c["n"]) != c["n"]}
     return out
 
 
@@ -939,6 +960,9 @@ def main():
         sys.exit("no submission id: run `lax init` in the output folder first, or set manifest.id")
     args.id = sub_id[len("lax-"):]
     pfx, cname, pname = args.prefix, f"Lax{args.id}", f"Lax{args.id}Proofs"
+    global LIB_PREFIX
+    LIB_PREFIX = pfx
+    RESTATED_LIB.update(args.restated)
     work = args.work or os.path.join(args.cache, "plans", sub_id)
     os.makedirs(work, exist_ok=True)
     src = resolve_library(args.library, args.ref, args.prefix, args.cache)
@@ -961,7 +985,9 @@ def main():
     # declarations are fed back as targets until nothing new appears.
     def run_closure(targets):
         plan = os.path.join(work, "closure.json")
-        run(["lean", "--run", slice_lean, "closure", pfx, plan] + sorted(targets), args.src, env)
+        # the environment knows a private declaration by its mangled name
+        run(["lean", "--run", slice_lean, "closure", pfx, plan] + sorted(MANGLED.get(t, t) for t in targets),
+            args.src, env)
         cl = json.load(open(plan, encoding="utf-8"))
         for c in cl["constants"]:
             c["name"] = demangle(c["name"])
@@ -1498,7 +1524,7 @@ def main():
                   "Lean.Parser.Command.set_option", "Lean.Parser.Command.omit", "Lean.Parser.Command.include"}
         def current_ns():
             return ".".join(n for kind, n, _ in depth if kind == "namespace")
-        def jump(body_text, derived=False, namespace=None):
+        def jump(body_text, derived=False, namespace=None, replay=False):
             """Declare `body_text` outside the current namespace chain: close
             every level, open a jump namespace, close it, reopen the levels
             and replay the scaffolding each had executed, which closing them
@@ -1516,9 +1542,11 @@ def main():
                 reopens.extend(scaffold)
             if namespace:
                 # a declaration moved into the concept's namespace keeps the
-                # scaffolding of the levels it was written under
+                # scaffolding of the levels it was written under; an alias
+                # needs none, and an `open` of a library namespace would not
+                # resolve there
                 ns_new = namespace
-                inside = [c for _, _, sc in depth for c in sc]
+                inside = [c for _, _, sc in depth for c in sc] if replay else []
             elif derived:
                 ns_new = f"{pname}.Derived"
                 prefixes = [".".join(cur.split(".")[:i + 1]) for i in range(len(cur.split("."))) if cur]
@@ -1531,6 +1559,8 @@ def main():
                     ns_new = f"{pname}.Foreign.{cur}" if cur else f"{pname}.Foreign"
                 inside = []
             return "\n\n".join(closes + [f"namespace {ns_new}"] + inside + [body_text, f"end {ns_new}"] + reopens)
+        unprivate_lines = {r["definition"][0] + 1 for r in refs.values()
+                           if r.get("unprivate") and r["module"] == mod and r.get("definition")}
         for cmd in keep:
             a, b = byte_to_char[cmd["start"]], byte_to_char[cmd["end"]]
             chunk = text[a:b]
@@ -1633,7 +1663,7 @@ def main():
                 if opens:
                     chunk = f"open {' '.join(opens)} in\n" + chunk
                 if inside:
-                    chunk = jump(chunk, namespace=inside)
+                    chunk = jump(chunk, namespace=inside, replay=True)
             # An unnamed instance is named after the auto-generated name the
             # library's build gave it, rooted under the package.
             if here and re.search(r"\binstance\b(?:\s*(?:\([^)]*\)|\[[^\]]*\]|\{[^}]*\}))*\s*:", chunk):
@@ -1745,12 +1775,15 @@ def main():
                     chunk += f"\n\nnamespace {r}\nend {r}"
                 for blk in cross_blocks:
                     chunk += "\n\n" + blk
-            # a vendored copy is not private, and its name is rooted under the
-            # package like every other
-            chunk = re.sub(r"(^|\n)([ \t]*)private\s+", r"\1\2", chunk)
-            if k in NOTATION_KINDS:
+            if k != "header" and any(cmd["line"] <= ln <= cmd["endLine"] for ln in unprivate_lines):
+                # the vendored copy of a private declaration written outside
+                # the library's namespace is not private, and its name is
+                # rooted under the package like every other
+                chunk = re.sub(r"(^|\n)([ \t]*)private\s+", r"\1\2", chunk)
+            if k in NOTATION_KINDS and not current_ns():
                 # the syntax declarations a notation command makes are named
-                # in the current namespace, which must be the package's
+                # in the current namespace, which must be under the package:
+                # at the root it is not
                 chunk = f"namespace {pname}\n{chunk}\nend {pname}"
             pieces.append(chunk)
             pieces.extend(alias_lines)
