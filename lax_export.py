@@ -1184,9 +1184,9 @@ def main():
                     silent_cmds.append((mod, cmd))
                 else:
                     stats["dropped"] += 1
-            # a `variable` no kept declaration follows within its section or
-            # namespace binds nothing, and may name a binder of a `variable`
-            # that was dropped: it goes too
+            # a `variable`, `include` or `omit` no kept declaration follows
+            # within its section or namespace binds nothing, and may name a
+            # binder of a `variable` that was dropped: it goes too
             OPENERS = ("Lean.Parser.Command.namespace", "Lean.Parser.Command.section",
                        "Lean.Parser.Command.noncomputableSection")
             def binds_nothing(i):
@@ -1203,7 +1203,8 @@ def main():
                 return True
             if mod not in full:
                 keep = [c for i, c in enumerate(keep)
-                        if not (c["kind"] == "Lean.Parser.Command.variable" and binds_nothing(i))]
+                        if not (c["kind"] in ("Lean.Parser.Command.variable", "Lean.Parser.Command.include",
+                                                    "Lean.Parser.Command.omit") and binds_nothing(i))]
             if content:
                 decisions[mod] = (text, byte_to_char, refs, keep)
         # a silent instance kept by its shape may rest on declarations the
@@ -1491,6 +1492,29 @@ def main():
                 proofs_ns = (f"{pname}.{n.rpartition('.')[0]}" if n.startswith(pfx + ".")
                              else f"{pname}.Foreign{'.' + n.rpartition('.')[0] if n.rpartition('.')[0] else ''}")
                 aliases.setdefault(ns_concept, {})[short] = (at(d[0], d[1]), proofs_ns)
+                # the alias exists only after the declaration: a recursive call
+                # written in field notation inside it (`M.posSeq t j` in the
+                # body of `posSeq`) is written as an application instead
+                own = next((c for c in keep if c["kind"] != "header"
+                            and c["line"] <= d[0] + 1 <= c["endLine"]), None)
+                for u in r["usages"] if own else []:
+                    if u[0] != u[2] or not (own["line"] <= u[0] + 1 <= own["endLine"]):
+                        continue
+                    ua, ub = at(u[0], u[1]), at(u[2], u[3])
+                    tok = text[ua:ub]
+                    if "." in tok and tok.rpartition(".")[2] == short:
+                        recv, start = tok.rpartition(".")[0], ua
+                    elif tok == short and ua > 0 and text[ua - 1] == ".":
+                        m = re.search(r"[\w'₀-₉]+$", text[:ua - 1])
+                        if not m:
+                            continue
+                        recv, start = m.group(0), m.start()
+                    else:
+                        continue
+                    # `Ns.f` naming the declaration through its namespace is
+                    # not a field access, and is patched as a name
+                    if re.fullmatch(r"[\w'₀-₉]+", recv) and not n.endswith(f".{recv}.{short}"):
+                        patches.append((start, ub, f"({short} {recv})"))
         for n in foreign:
             r = refs.get(n)
             if not r:
