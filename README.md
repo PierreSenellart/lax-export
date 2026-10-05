@@ -134,6 +134,9 @@ The submission:
   ownership being a separate list of GitHub accounts set with `lax owners`.
 - `copyright`: the one trailing “YYYY NAME” line the Lax archive allows after
   the Apache 2.0 text of the submission's `LICENSE`.
+- `notice`: a paragraph for the submission's `NOTICE`, written before the
+  library's license text when there is one: the terms of a paper carried in
+  the submission, say.
 - `force_license`: write the submission even if the library's license does
   not permit redistribution under Apache 2.0 (see Licenses).
 - `env`: target an archive environment other than the epoch, such as

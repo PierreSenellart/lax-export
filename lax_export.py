@@ -242,12 +242,46 @@ def check_environment(toolchain, mathlib_rev, env_id, before_build=False):
           file=sys.stderr)
 
 
+def outside_comments(text, fn):
+    """`fn` applied to the code of `text`, its comments left as they are:
+    `--` line comments and (nested) `/- … -/` block comments, docstrings
+    included, since prose mentioning a library's root name is not a
+    reference to it."""
+    out = []
+    i, n, code_start = 0, len(text), 0
+    while i < n:
+        if text.startswith("--", i):
+            out.append(fn(text[code_start:i]))
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            out.append(text[i:j])
+            i = code_start = j
+        elif text.startswith("/-", i):
+            out.append(fn(text[code_start:i]))
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if text.startswith("/-", j):
+                    depth += 1
+                    j += 2
+                elif text.startswith("-/", j):
+                    depth -= 1
+                    j += 2
+                else:
+                    j += 1
+            out.append(text[i:j])
+            i = code_start = j
+        else:
+            i += 1
+    out.append(fn(text[code_start:]))
+    return "".join(out)
+
+
 def rewriter(prefix, new_prefix):
     # The prefix as a whole name component: not preceded by a name character
     # or a dot, except the explicit root marker `_root_.`, and followed by a
-    # dot or a non-name character.
+    # dot or a non-name character; comments are left alone.
     pat = re.compile(r"(?:(?<=_root_\.)|(?<![\w.']))" + re.escape(prefix) + r"(?![\w'])")
-    return lambda text: pat.sub(new_prefix, text)
+    return lambda text: outside_comments(text, lambda code: pat.sub(new_prefix, code))
 
 
 LAKEFILE = """name = "{name}"
@@ -276,30 +310,38 @@ PERMISSIVE = {
 }
 
 
-def write_licenses(src, out, copyright_line, force):
+def write_licenses(src, out, copyright_line, force, notice=None):
     """The Lax accepts exactly one license for a submission, Apache 2.0,
     with at most one trailing copyright line. The vendored code keeps its
     own headers; when the library's license is a permissive one that
     permits sublicensing, its text goes into NOTICE beside the Apache text;
-    a library under any other license is refused unless forced."""
+    a library under any other license is refused unless forced. `notice`
+    is a paragraph of the author's for NOTICE, say the terms of a paper
+    carried in the submission."""
     apache = open(os.path.join(HERE, "LICENSE"), encoding="utf-8").read()
     text = apache + (f"\nCopyright {copyright_line}\n" if copyright_line else "")
     write(os.path.join(out, "LICENSE"), text)
+    notice_path = os.path.join(out, "NOTICE")
     path = os.path.join(src, "LICENSE")
     if not os.path.isfile(path):
         print("warning: the library has no LICENSE file; the submission's NOTICE cannot name its terms",
               file=sys.stderr)
+        if notice:
+            write(notice_path, notice.strip() + "\n")
         return
     lib = open(path, encoding="utf-8").read()
     if re.search(r"Apache License\s+Version 2\.0", lib):
+        if notice:
+            write(notice_path, notice.strip() + "\n")
         return                                                         # same license, nothing to add
     kind = next((k for k, pat in PERMISSIVE.items() if re.search(pat, lib)), None)
     if kind is None and not force:
         sys.exit("the library's LICENSE is neither Apache 2.0 nor a permissive license that permits "
                  "sublicensing (MIT, BSD, ISC, 0BSD, Unlicense, CC0): the Lax archive requires Apache 2.0 "
                  "for the submission, so it cannot be built from this library; --force-license overrides")
-    write(os.path.join(out, "NOTICE"),
-          "The Lean code under proofs/ is derived from a library distributed under the "
+    write(notice_path,
+          (notice.strip() + "\n\n" if notice else "")
+          + "The Lean code under proofs/ is derived from a library distributed under the "
           f"following license{' (' + kind + ')' if kind else ''}, whose notices the vendored "
           "files retain. This submission is distributed under the Apache License 2.0, see LICENSE.\n\n"
           + lib)
@@ -308,7 +350,7 @@ def write_licenses(src, out, copyright_line, force):
 MANIFEST_KEYS = {"id", "title", "authors", "bibEntries", "supersedes", "unlisted", "anonymous",
                  "issue", "paper", "initialOwners"}
 CONFIG_KEYS = {"library", "ref", "prefix", "targets", "options", "whole_modules",
-               "copyright", "force_license", "env", "manifest", "out", "restated", "requires"}
+               "copyright", "force_license", "notice", "env", "manifest", "out", "restated", "requires"}
 REQUIRE_KEYS = {"package", "repository", "commit", "folder", "restated_from"}
 
 
@@ -378,6 +420,7 @@ def load_config(path):
         "whole_modules": bool(raw.get("whole_modules", False)),
         "copyright": raw.get("copyright"),
         "force_license": bool(raw.get("force_license", False)),
+        "notice": raw.get("notice"),
         "env": raw.get("env"),
         "manifest": manifest,
         "out": rel(raw.get("out", ".")),
@@ -455,6 +498,10 @@ SCAFFOLD = {
     "Lean.Parser.Command.omit", "Lean.Parser.Command.include",
     "Lean.Parser.Command.export", "Lean.Parser.Command.eoi",
 }
+# commands that declare syntax, named in the current namespace
+NOTATION_KINDS = {"Lean.Parser.Command.notation", "Lean.Parser.Command.mixfix",
+                  "Lean.Parser.Command.macro", "Lean.Parser.Command.macro_rules",
+                  "Lean.Parser.Command.syntax"}
 # scaffolding whose references to library constants must all be selected
 CHECKED = {"Lean.Parser.Command.variable", "Lean.Parser.Command.attribute",
            "Lean.Parser.Command.omit", "Lean.Parser.Command.include",
@@ -472,6 +519,14 @@ def module_path(src, mod):
     return os.path.join(src, *mod.split(".")) + ".lean"
 
 
+def demangle(name):
+    """A private declaration by the name it is written with: Lean mangles
+    `private def Why.zsf` of module `M` into `_private.M.0.Why.zsf`, and a
+    vendored copy, rooted under the package like every other library name,
+    is no longer private."""
+    return re.sub(r"^_private\..*?\.0\.", "", name)
+
+
 def ilean(build, mod):
     p = os.path.join(build, *mod.split(".")) + ".ilean"
     if not os.path.isfile(p):
@@ -480,8 +535,8 @@ def ilean(build, mod):
     out = {}
     for k, v in d["references"].items():
         c = json.loads(k)["c"]
-        out[c["n"]] = {"module": c["m"], "definition": v.get("definition"),
-                       "usages": v.get("usages", [])}
+        out[demangle(c["n"])] = {"module": c["m"], "definition": v.get("definition"),
+                                 "usages": v.get("usages", [])}
     return out
 
 
@@ -872,7 +927,7 @@ def main():
     cfg = load_config(args.config)
     args.out = os.path.abspath(args.out or cfg["out"])
     for key in ("prefix", "target", "set_option", "whole_modules",
-                "copyright", "force_license", "env", "manifest", "library", "ref", "restated",
+                "copyright", "force_license", "notice", "env", "manifest", "library", "ref", "restated",
                 "requires"):
         setattr(args, key, cfg[key])
     existing = existing_manifest(args.out)
@@ -907,7 +962,10 @@ def main():
     def run_closure(targets):
         plan = os.path.join(work, "closure.json")
         run(["lean", "--run", slice_lean, "closure", pfx, plan] + sorted(targets), args.src, env)
-        return json.load(open(plan, encoding="utf-8"))
+        cl = json.load(open(plan, encoding="utf-8"))
+        for c in cl["constants"]:
+            c["name"] = demangle(c["name"])
+        return cl
 
     def imports_of(mod):
         path = module_path(args.src, mod)
@@ -1154,14 +1212,29 @@ def main():
     # notation on the other package's type looks it up in that package's
     # namespace, so each vendored module using it gets an alias there
     cross_aliases = {}            # namespace to alias into -> {namespace aliased: shorts}
+    _own_names = {c["name"] for c in own}
     for _n, _con in restated.items():
+        if _n.startswith("_private."):
+            continue              # private: never reached by field notation
         _parents = [l for l in restated if l != _n and _n.startswith(l + ".")]
-        if not _parents:
-            continue
-        _lib = max(_parents, key=len)
-        _rest = _n[len(_lib) + 1:]
-        _expected = restated[_lib] + ("." + _rest.rpartition(".")[0] if "." in _rest else "")
         _con_ns, _short = _con.rpartition(".")[0], _con.rpartition(".")[2]
+        if _parents:
+            _lib = max(_parents, key=len)
+            _rest = _n[len(_lib) + 1:]
+            _expected = restated[_lib] + ("." + _rest.rpartition(".")[0] if "." in _rest else "")
+        else:
+            # a restated declaration under a namespace the library does not
+            # restate: Mathlib's (`List.addKV`), where field notation looks
+            # it up unchanged, or a vendored library type's, looked up under
+            # the proofs package's name for that type
+            _ns = _n.rpartition(".")[0]
+            if not _ns:
+                continue
+            if _ns in _own_names:
+                _expected = (f"{pname}.{_ns}" if _ns.startswith(args.prefix + ".")
+                             else f"{pname}.Foreign.{_ns}")
+            else:
+                _expected = _ns
         if _con_ns != _expected:
             cross_aliases.setdefault(_expected, {}).setdefault(_con_ns, set()).add((_n, _short))
     def within(n, lib):
@@ -1255,7 +1328,7 @@ def main():
         ls = text.rfind("\n", 0, a) + 1
         le = text.find("\n", a)
         le = len(text) if le == -1 else le
-        return re.search(r"\|\s*$", text[ls:a]) is not None and "=>" in text[a:le]
+        return re.search(r"\|\s*@?\s*$", text[ls:a]) is not None and "=>" in text[a:le]
 
     def field_binder(a, b, n):
         """`state := …` or `relFormula R t := …` in a structure instance
@@ -1347,7 +1420,11 @@ def main():
                     continue
                 a = at(u[0], u[1]); b = at(u[2], u[3])
                 tok = text[a:b]
-                if not (n == tok or n.endswith("." + tok)) or (a > 0 and text[a - 1] == "."):
+                if tok.startswith("_root_."):
+                    tok = tok[len("_root_."):]      # `_root_.name`: patched whole
+                    if n != tok:
+                        continue
+                elif not (n == tok or n.endswith("." + tok)) or (a > 0 and text[a - 1] == "."):
                     continue
                 if field_binder(a, b, n) or case_alternative(a):
                     continue
@@ -1366,7 +1443,7 @@ def main():
                 ns_concept = con + ("." + rest.rpartition(".")[0] if "." in rest else "")
                 short = rest.rpartition(".")[2]
                 proofs_ns = (f"{pname}.{n.rpartition('.')[0]}" if n.startswith(pfx + ".")
-                             else f"{pname}.Foreign.{n.rpartition('.')[0]}")
+                             else f"{pname}.Foreign{'.' + n.rpartition('.')[0] if n.rpartition('.')[0] else ''}")
                 aliases.setdefault(ns_concept, {})[short] = (at(d[0], d[1]), proofs_ns)
         for n in foreign:
             r = refs.get(n)
@@ -1438,8 +1515,10 @@ def main():
                 reopens.append(f"{kind} {name}" if name else kind)
                 reopens.extend(scaffold)
             if namespace:
+                # a declaration moved into the concept's namespace keeps the
+                # scaffolding of the levels it was written under
                 ns_new = namespace
-                inside = []
+                inside = [c for _, _, sc in depth for c in sc]
             elif derived:
                 ns_new = f"{pname}.Derived"
                 prefixes = [".".join(cur.split(".")[:i + 1]) for i in range(len(cur.split("."))) if cur]
@@ -1491,7 +1570,8 @@ def main():
                 chunk = chunk[:pa - a] + new + chunk[pb - a:]
                 stats["patched"] += 1
             k = cmd["kind"]
-            if k == "Lean.Parser.Command.open":
+            open_in = re.match(r"(\s*)(open\b[^\n]*?\bin\b)", chunk)
+            if k == "Lean.Parser.Command.open" or open_in:
                 # a namespace opened by its library name: when it is the
                 # namespace of a restated declaration, the concept's namespace
                 # is what carries its contents now (the vendored package keeps
@@ -1500,17 +1580,25 @@ def main():
                 def reopen(m):
                     name = m.group(0)
                     for lib, con in restated.items():
-                        if lib == f"{pfx}.{name}" or (cur and lib == f"{pfx}.{cur}.{name}"):
+                        if lib == f"{pfx}.{name}" or (cur and lib == f"{pfx}.{cur}.{name}") or lib == name:
                             vendored_too = any(n.startswith(lib + ".") and substitute(n) is None
                                                and refs.get(n, {}).get("definition") for n in refs)
                             stats["opens"] = stats.get("opens", 0) + 1
-                            return f"{con} {name}" if vendored_too else con
+                            # what stayed vendored of a root-level namespace is rooted
+                            # under the package's foreign names
+                            vend = f"{pname}.Foreign.{name}" if lib == name else name
+                            return f"{con} {vend}" if vendored_too else con
                     return name
-                head, _, rest = chunk.partition("open")
+                if open_in and k != "Lean.Parser.Command.open":
+                    head, rest = open_in.group(1), open_in.group(2)[len("open"):]
+                    tail = chunk[open_in.end():]
+                else:
+                    head, _, rest = chunk.partition("open")
+                    tail = ""
                 rest = re.sub(r"(?<![\w.'])[A-Za-z_][\w'.]*(?![\w'])",
                               lambda m: m.group(0) if m.group(0) in ("in", "scoped", "hiding", "renaming")
                               else reopen(m), rest)
-                chunk = head + "open" + rest
+                chunk = head + "open" + rest + tail
             if k == "Lean.Parser.Command.namespace":
                 depth.append(["namespace", chunk.split()[1], []])
             elif k in ("Lean.Parser.Command.section", "Lean.Parser.Command.noncomputableSection"):
@@ -1525,15 +1613,41 @@ def main():
             # Foreign declarations this command makes, by the ilean records
             here = [n for n in foreign if refs.get(n) and refs[n].get("definition")
                     and a <= at(refs[n]["definition"][0], refs[n]["definition"][1]) < b]
+            # `def Ns.f` opens `Ns` for its body, where constructor patterns and
+            # sibling declarations are written by their short names; the
+            # rooted copy opens what carries that namespace now, the concept's
+            # for a restated type and the package's for what stayed vendored
+            opens, inside = [], None
+            for n in here:
+                ns = n.rpartition(".")[0]
+                if not ns:
+                    continue
+                if ns in restated and inside is None:
+                    # inside the concept's namespace, not merely opening it: a
+                    # constructor `Prod` must shadow the root's, as it did
+                    inside = restated[ns]
+                if ns in exports:
+                    opens.append(f"{pname}.Foreign.{ns}")
+            opens = [o for i, o in enumerate(opens) if o not in opens[:i]]
+            if k not in SCAFFOLD:
+                if opens:
+                    chunk = f"open {' '.join(opens)} in\n" + chunk
+                if inside:
+                    chunk = jump(chunk, namespace=inside)
             # An unnamed instance is named after the auto-generated name the
             # library's build gave it, rooted under the package.
-            if here and re.search(r"\binstance\s*(?:\([^)]*\)\s*)?:", chunk):
+            if here and re.search(r"\binstance\b(?:\s*(?:\([^)]*\)|\[[^\]]*\]|\{[^}]*\}))*\s*:", chunk):
                 inst = [n for n in here if n.rpartition(".")[2].startswith("inst")]
                 if inst:
                     def named(m):
-                        prio = m.group(1).strip()
-                        return f"instance {prio + ' ' if prio else ''}_root_.{pname}.Foreign.{inst[0]} :"
-                    chunk = re.sub(r"\binstance(\s*(?:\([^)]*\)\s*)?):", named, chunk, count=1)
+                        # a priority stays before the name, binders go after it
+                        binders = m.group(1).strip()
+                        prio = re.match(r"\(\s*priority\s*:=[^)]*\)", binders)
+                        if prio:
+                            binders = binders[prio.end():].strip()
+                        return (f"instance {prio.group(0) + ' ' if prio else ''}_root_.{pname}.Foreign.{inst[0]}"
+                                f"{' ' + binders if binders else ''} :")
+                    chunk = re.sub(r"\binstance((?:\s*(?:\([^)]*\)|\[[^\]]*\]|\{[^}]*\}))*\s*):", named, chunk, count=1)
             # A `deriving` clause on a rooted inductive would name its
             # instance in the enclosing namespace: it is derived under the
             # package's namespace instead.
@@ -1566,7 +1680,7 @@ def main():
                     rel = ns[len(cur) + 1:] if cur else ns
                 else:
                     stats["unpatched"].append((mod, ns, "export outside its namespace")); continue
-                line = f"export {pname}.Foreign.{ns} ({' '.join(sorted(here))})"
+                line = f"export {pname}.Foreign{'.' + ns if ns else ''} ({' '.join(sorted(here))})"
                 alias_lines.append(line if rel is None else f"namespace {rel}\n{line}\nend {rel}")
             expansion = cmd.get("expansion")
             if (expansion and not k.startswith("Lean.Parser.Command.")
@@ -1615,7 +1729,10 @@ def main():
                 # does only relative to the current one: register at the top,
                 # where the module is still at the root
                 register = {pns for shorts in aliases.values() for _, pns in shorts.values()}
-                register |= {f"{pname}.Foreign.{ns}" for ns in exports}
+                register |= {f"{pname}.Foreign.{ns}" if ns else f"{pname}.Foreign" for ns in exports}
+                # the concept's namespace of a restated declaration, opened by
+                # the rooted declarations under it, which a plain `def` has not
+                register |= {restated[ns] for ns in exports if ns in restated}
                 cross_blocks = []
                 for _ns, _by in cross_aliases.items():
                     for _con_ns, _pairs in _by.items():
@@ -1628,6 +1745,13 @@ def main():
                     chunk += f"\n\nnamespace {r}\nend {r}"
                 for blk in cross_blocks:
                     chunk += "\n\n" + blk
+            # a vendored copy is not private, and its name is rooted under the
+            # package like every other
+            chunk = re.sub(r"(^|\n)([ \t]*)private\s+", r"\1\2", chunk)
+            if k in NOTATION_KINDS:
+                # the syntax declarations a notation command makes are named
+                # in the current namespace, which must be the package's
+                chunk = f"namespace {pname}\n{chunk}\nend {pname}"
             pieces.append(chunk)
             pieces.extend(alias_lines)
         body = "\n\n".join(pieces)
@@ -1693,7 +1817,7 @@ def main():
         elif key in existing:                      # `issue` is what lax submit wrote
             manifest[key] = existing[key]
     write(os.path.join(args.out, "manifest.yaml"), dump_manifest(manifest))
-    write_licenses(args.src, args.out, args.copyright, args.force_license)
+    write_licenses(args.src, args.out, args.copyright, args.force_license, args.notice)
     if not os.path.isfile(os.path.join(args.out, ".gitignore")):
         write(os.path.join(args.out, ".gitignore"), "build-output.json\nlake-manifest.json\n.lake/\n")
     print(f"{len(concept_mods)} concept modules and {len(bridge_mods)} bridge modules found in place",
