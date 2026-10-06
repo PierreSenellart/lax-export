@@ -427,6 +427,17 @@ def load_config(path):
     }
 
 
+LEAN_KEYWORDS = frozenset("""at by calc catch class def deriving do else end example export extends finally fun
+have if import in inductive instance let local macro match mutual namespace notation open private protected
+return scoped section show structure syntax then theorem try universe variable where with abbrev axiom
+attribute from for mut break continue unless""".split())
+
+
+def lean_ident(name):
+    """A name component as Lean source: «guillemets» around a keyword."""
+    return f"«{name}»" if name in LEAN_KEYWORDS else name
+
+
 class _Quoted(str):
     """A scalar written in double quotes, as the Lax archive's examples write
     every string field (a commit hash or an ORCID left plain could read as
@@ -1815,7 +1826,8 @@ def main():
                 by_pns = {}
                 for sh, pns in here.items():
                     by_pns.setdefault(pns, []).append(sh)
-                body_text = "\n".join(f"export {pns} ({' '.join(sorted(shs))})" for pns, shs in by_pns.items())
+                body_text = "\n".join(f"export {pns} ({' '.join(lean_ident(x) for x in sorted(shs))})"
+                                      for pns, shs in by_pns.items())
                 alias_lines.append(jump(body_text, namespace=ns_concept))
             for ns, shorts in exports.items():
                 here = [sh for sh, pos in shorts.items() if a <= pos < b]
@@ -1828,7 +1840,7 @@ def main():
                     rel = ns[len(cur) + 1:] if cur else ns
                 else:
                     stats["unpatched"].append((mod, ns, "export outside its namespace")); continue
-                line = f"export {pname}.Foreign{'.' + ns if ns else ''} ({' '.join(sorted(here))})"
+                line = f"export {pname}.Foreign{'.' + ns if ns else ''} ({' '.join(lean_ident(x) for x in sorted(here))})"
                 alias_lines.append(line if rel is None else f"namespace {rel}\n{line}\nend {rel}")
             expansion = cmd.get("expansion")
             if (expansion and not k.startswith("Lean.Parser.Command.")
