@@ -610,16 +610,18 @@ def demangle(name):
     like every other library name, is no longer private. A private
     declaration under the library's namespace keeps its mangled name and
     stays private: its vendored copy is under the package already, and two
-    modules may each have their own `private def Lib.aux`. The exception is
-    a private declaration under a restated one, `private def Lib.Spec.pad`
-    used as `spec.pad`: field notation on the concept's type finds it only
-    through an alias, which a private name cannot have."""
+    modules may each have their own `private def Lib.aux`. The exceptions
+    are a private declaration the concepts restate, which the restated map
+    names as written, and a private declaration under a restated one,
+    `private def Lib.Spec.pad` used as `spec.pad`: field notation on the
+    concept's type finds it only through an alias, which a private name
+    cannot have."""
     m = re.match(r"^_private\..*?\.0\.(.*)$", name)
     if not m:
         return name
     inner = m.group(1)
     parts = inner.split(".")
-    if not any(".".join(parts[:i]) in RESTATED_LIB for i in range(1, len(parts))):
+    if inner not in RESTATED_LIB and not any(".".join(parts[:i]) in RESTATED_LIB for i in range(1, len(parts))):
         if LIB_PREFIX and (inner == LIB_PREFIX or inner.startswith(LIB_PREFIX + ".")):
             return name
     MANGLED[inner] = name
@@ -1456,6 +1458,23 @@ def main():
         le = len(text) if le == -1 else le
         return re.search(r"\|\s*@?\s*$", text[ls:a]) is not None and "=>" in text[a:le]
 
+    def tactic_alternative(a):
+        """The alternative at `a` belongs to `induction … with` or `cases … with`:
+        the first line above it, as indented as it or less, that is not an
+        alternative itself is the tactic's."""
+        ls = text.rfind("\n", 0, a) + 1
+        ind = len(text[ls:a]) - len(text[ls:a].lstrip())
+        pos = ls - 1
+        while pos > 0:
+            ps = text.rfind("\n", 0, pos) + 1
+            line = text[ps:pos]
+            pos = ps - 1
+            body = line.lstrip()
+            if not body or (len(line) - len(body) > ind) or body.startswith("|"):
+                continue
+            return re.search(r"\b(induction|cases|rcases|obtain)\b.*\bwith\b", line) is not None
+        return False
+
     def field_binder(a, b, n):
         """`state := …` or `relFormula R t := …` in a structure instance
         names a field, not a use: a bare field name opening its line (or
@@ -1552,7 +1571,17 @@ def main():
                         continue
                 elif not (n == tok or n.endswith("." + tok)) or (a > 0 and text[a - 1] == "."):
                     continue
-                if field_binder(a, b, n) or case_alternative(a):
+                if field_binder(a, b, n):
+                    continue
+                if case_alternative(a):
+                    # a constructor of a restated inductive, written by its short
+                    # name in a match arm under the library's namespace of the
+                    # type, which the vendored copy no longer is: its full name,
+                    # legal in a pattern. An alternative of `induction`/`cases`
+                    # names a case, not a constructor, and stays as written.
+                    if ("." not in tok and n.rpartition(".")[0] in restated
+                            and not tactic_alternative(a)):
+                        patches.append((a, b, new))
                     continue
                 patches.append((a, b, new))
         # a kept library declaration under a restated namespace, a theorem about
