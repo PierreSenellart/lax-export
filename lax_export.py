@@ -1307,8 +1307,11 @@ def main():
                 if cmd["kind"] == "header" or cmd["kind"] in SCAFFOLD:
                     continue
                 for n, r in refs.items():
+                    # `Lean.…`: an option a `set_option … in` names, recorded as
+                    # a use of the module it is set in; never a library declaration
                     if (not r["module"].startswith(pfx) or n in selected or n in targets
-                            or n.startswith("_private.") or GENERATED_SUFFIX.search(n)):
+                            or n.startswith("_private.") or n.startswith("Lean.")
+                            or GENERATED_SUFFIX.search(n)):
                         continue
                     if any(cmd["line"] <= u[0] + 1 <= cmd["endLine"] for u in r["usages"]):
                         extra.add(n)
