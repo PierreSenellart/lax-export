@@ -1490,7 +1490,9 @@ def main():
         after = text[b:nl if nl >= 0 else len(text)]
         if re.search(r"(?:^|[{,])\s*$", before) is None:
             return False
-        if ":=" in after:
+        # a named argument `(X := …)` right after the name is an application,
+        # not a field definition
+        if ":=" in after and not re.match(r"\s*\(\s*[\w'₀-₉]+\s*:=", after):
             return True
         # a field given by match alternatives: `arity` alone on its line,
         # the alternatives `| .elt => 1` following
