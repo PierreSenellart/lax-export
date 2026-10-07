@@ -1202,6 +1202,7 @@ def main():
         silent_attrs = re.compile(r"\b(simp|simps|ext|norm_cast|refl|trans|symm|aesop|coe|reducible|instance)\b")
         stats = {"kept": 0, "dropped": 0, "lines": 0, "patched": 0, "unpatched": [], "instances": 0, "expanded": 0}
         decisions = {}            # module -> (text, byte_to_char, refs, keep list)
+        gone_binders_of = {}      # module -> hypotheses of the `variable` commands dropped
         ilean_cache = {}
         for mod in sorted(all_mods):
             src_path = module_path(args.src, mod)
@@ -1219,7 +1220,15 @@ def main():
                 if r["module"].startswith(pfx):
                     for u in r["usages"]:
                         uses_by_line.setdefault(u[0] + 1, []).append((n, u))
-            wanted = by_mod.get(mod, [])
+            wanted = list(by_mod.get(mod, []))
+            # a name the library declares in two modules never imported
+            # together: the closure places it in one, but this module's own
+            # declaration is the one its commands use
+            for n, r in refs.items():
+                d = r.get("definition")
+                if (d and r["module"] == mod and n in selected and ranged[n]["module"] != mod
+                        and not n.startswith("_private.")):
+                    wanted.append((d[0] + 1, d[2] + 1, n))
             def overlaps(cmd):
                 return any(not (e < cmd["line"] or s > cmd["endLine"]) for s, e, _ in wanted)
             def declared_by_kept(n):
@@ -1245,6 +1254,7 @@ def main():
                     return False
                 return m.group("kw") == "instance" or bool(silent_attrs.search(m.group("attrs") or ""))
             keep, content = [], False
+            gone_binders = set()      # hypotheses of `variable` commands dropped
             drops_syntax = bool(category_mods.get(mod))
             for cmd in commands[mod]["commands"]:
                 k = cmd["kind"]
@@ -1256,6 +1266,9 @@ def main():
                     keep.append(cmd); content = True; continue
                 if k in SCAFFOLD:
                     if k in CHECKED and mentions_unselected(cmd):
+                        if k == "Lean.Parser.Command.variable":
+                            a_, b_ = byte_to_char[cmd["start"]], byte_to_char[cmd["end"]]
+                            gone_binders.update(re.findall(r"\(\s*([\w'₀-₉]+)\s*:", text[a_:b_]))
                         stats["dropped"] += 1; continue
                     keep.append(cmd); continue
                 if overlaps(cmd):
@@ -1286,6 +1299,13 @@ def main():
                 keep = [c for i, c in enumerate(keep)
                         if not (c["kind"] in ("Lean.Parser.Command.variable", "Lean.Parser.Command.include",
                                                     "Lean.Parser.Command.omit") and binds_nothing(i))]
+            # a hypothesis whose `variable` was dropped: no kept declaration
+            # can rest on it, so the `include`/`omit` naming it lose the name
+            for c in keep:
+                if c["kind"] == "Lean.Parser.Command.variable":
+                    gone_binders -= set(re.findall(r"\(\s*([\w'₀-₉]+)\s*:",
+                                                   text[byte_to_char[c["start"]]:byte_to_char[c["end"]]]))
+            gone_binders_of[mod] = gone_binders
             if content:
                 decisions[mod] = (text, byte_to_char, refs, keep)
         # a silent instance kept by its shape may rest on declarations the
@@ -1481,14 +1501,16 @@ def main():
     def field_binder(a, b, n):
         """`state := …` or `relFormula R t := …` in a structure instance
         names a field, not a use: a bare field name opening its line (or
-        following `{` or `,`), with `:=` later on the line."""
+        following `{`, `,` or the `with` of a structure update), with `:=`
+        later on the line."""
         tok = text[a:b]
-        if "." in tok or not (n.rpartition(".")[0] in substituted or n.rpartition(".")[0] in foreign):
+        parent = n.rpartition(".")[0]
+        if "." in tok or not (parent in substituted or parent in foreign or parent in restated):
             return False
         before = text[text.rfind("\n", 0, a) + 1:a]
         nl = text.find("\n", b)
         after = text[b:nl if nl >= 0 else len(text)]
-        if re.search(r"(?:^|[{,])\s*$", before) is None:
+        if re.search(r"(?:^|[{,]|\{[^{}]*\swith)\s*$", before) is None:
             return False
         # a named argument `(X := …)` right after the name is an application,
         # not a field definition
@@ -1514,6 +1536,14 @@ def main():
     # library-defined command generated have no definition record of their own
     foreign |= {n for n in selected if not n.startswith(pfx + ".") and not n.startswith("_private.")}
     foreign = {n for n in foreign if substitute(n) is None}
+    # every library name some vendored module still declares
+    kept_names = set(selected)
+    for mod, (text, byte_to_char, refs, keep) in decisions.items():
+        kept_ranges = [(c["line"], c["endLine"]) for c in keep if c["kind"] != "header"]
+        for n, r in refs.items():
+            d = r.get("definition")
+            if r["module"] == mod and d and any(a <= d[0] + 1 <= b for a, b in kept_ranges):
+                kept_names.add(n)
     memo = {}
     def below(mod):
         if mod in memo:
@@ -1743,6 +1773,23 @@ def main():
             foreign_here = {n for n in foreign if refs.get(n)
                             for u in refs[n]["usages"] if u[0] == u[2] and in_expansion(at(u[0], u[1]))}
             edits = [(pa, pb, new) for pa, pb, new in local]
+            if cmd["kind"] == "Lean.Parser.Command.export":
+                # an `export` of the library naming declarations the slice
+                # dropped: those names go, and the command with them if none is left
+                gone = []
+                for n, r in refs.items():
+                    if (not r["module"].startswith(pfx) or n in kept_names or substitute(n) is not None):
+                        continue
+                    for u in r["usages"]:
+                        if u[0] == u[2] and a <= at(u[0], u[1]) < b:
+                            gone.append((at(u[0], u[1]), at(u[2], u[3])))
+                if gone:
+                    edits = [e for e in edits if not any(ga <= e[0] < gb for ga, gb in gone)]
+                    edits += [(ga, gb, "") for ga, gb in gone]
+                    stats["export_pruned"] = stats.get("export_pruned", 0) + len(gone)
+                    names = re.search(r"\((.*)\)", chunk, re.S)
+                    if names and len(names.group(1).split()) == len(gone):
+                        continue
             for ma, mb, mt in outer:
                 for n in foreign_here:
                     short = n.rpartition(".")[2]
@@ -1763,6 +1810,31 @@ def main():
                 chunk = chunk[:pa - a] + new + chunk[pb - a:]
                 stats["patched"] += 1
             k = cmd["kind"]
+            gone = gone_binders_of.get(mod)
+            if gone:
+                def strip_binders(clause):
+                    return re.sub(r"(?<![\w'.])(?:" + "|".join(map(re.escape, sorted(gone))) + r")(?![\w'₀-₉])\s*",
+                                  "", clause)
+                if k in ("Lean.Parser.Command.include", "Lean.Parser.Command.omit"):
+                    kw, _, rest = chunk.lstrip().partition(" ")
+                    rest = strip_binders(rest)
+                    if not rest.strip():
+                        continue
+                    chunk = chunk[:len(chunk) - len(chunk.lstrip())] + kw + " " + rest
+                else:
+                    # the leading `omit … in` and `include … in` clauses only
+                    out_, pos = [], 0
+                    while True:
+                        m = re.compile(r"(\s*)(omit|include)\s+(.*?)(\s+in\b\s*)", re.S).match(chunk, pos)
+                        if not m:
+                            break
+                        body = strip_binders(m.group(3))
+                        if body.strip():
+                            out_.append(m.group(1) + m.group(2) + " " + body.rstrip() + m.group(4))
+                        else:
+                            out_.append(m.group(1))
+                        pos = m.end()
+                    chunk = "".join(out_) + chunk[pos:]
             open_in = re.match(r"(\s*)(open\b[^\n]*?\bin\b)", chunk)
             if k == "Lean.Parser.Command.open" or open_in:
                 # a namespace opened by its library name: when it is the
