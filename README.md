@@ -85,7 +85,7 @@ The library and what to export:
   definitions, and the proofs package uses those. A concept name is relative
   to the submission's own concept package, whose `LaxN` prefix the tool
   takes from the manifest; a fully qualified `LaxN.…` name is reserved for
-  the declaration of another, registered submission (not supported yet).
+  the declaration of another, registered submission, listed in `requires`.
   For each mapped declaration the tool drops the library's defining
   command, renames the constants that command generated (constructors,
   projections, derived instances, equation lemmas) after the concept's, and
@@ -191,6 +191,7 @@ Operational only:
 - `--work DIR`: where the plans go, the closure and per-file command
   listings, reused on a second run (default: `plans/lax-N/` under the
   cache).
+- `--version`: print the version of `lax-export` and exit.
 
 ### Which build is read
 
@@ -223,8 +224,8 @@ is needed. When it is under a permissive license that permits sublicensing
 a `NOTICE` file at the submission's root, with a sentence saying where the
 code comes from; the Lax archive allows extra root-level documentation. A
 library under any other license, copyleft ones above all, is refused,
-since relabeling it would not be lawful; `--force-license` overrides for
-the cases the detection gets wrong.
+since relabeling it would not be lawful; `force_license` in the export file
+overrides for the cases the detection gets wrong.
 
 ### Checking the result
 

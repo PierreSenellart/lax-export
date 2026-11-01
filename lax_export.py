@@ -42,16 +42,14 @@ Concept files and bridge proofs are hand-written and copied in from
 are substituted).
 
 Usage:
-  lax_export.py --library DIR --prefix NS --id N --title T --out DIR
-                 --target C [--target C …] [--ref TAG]
-                 [--set-option "name value"]… [--whole-modules]
-                 [--concepts DIR] [--bridges DIR] [--author NAME]…
+  lax_export.py EXPORT.yaml [--out DIR] [--cache DIR] [--work DIR]
+                 [--jobs N] [--skeleton] [--no-environment-check]
 
-`--library` is a checkout with a completed `lake build`; `--ref` takes the
-sources from that git ref instead of the working tree, which must be what
-the build compiled. The `.ilean` files of that build are the parser the
-rewrite relies on, so a build of other sources gives wrong positions, which
-the tool detects and refuses.
+The export file (see the README) names the library, the ref, the prefix and
+the targets. The library's `.ilean` files are the parser the rewrite relies
+on, so they must come from a build of exactly the sources exported: a local
+checkout is used when it is that build, and the ref is otherwise cloned and
+built under the cache.
 """
 import argparse
 import glob
@@ -65,6 +63,8 @@ import time
 
 import yaml
 from concurrent.futures import ThreadPoolExecutor
+
+__version__ = "0.1.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -1009,9 +1009,10 @@ def write_skeletons(args, cname, pfx, restated, restated_cmds, decisions, comman
 
 def main():
     ap = argparse.ArgumentParser(description="export theorems of a Lean library as a Lax submission")
+    ap.add_argument("--version", action="version", version=f"lax-export {__version__}")
     ap.add_argument("config", help="the export's YAML description (see README)")
     ap.add_argument("--out", help="the submission folder to write (default: the config's `out`, "
-                                  "else `submission/` beside the config)")
+                                  "else the folder holding the config)")
     ap.add_argument("--cache", default=os.environ.get("LAX_EXPORT_CACHE",
                                                       os.path.join(tempfile.gettempdir(), "lax-export")),
                     help="where clones are built when the local build cannot be used "
@@ -1020,7 +1021,7 @@ def main():
     ap.add_argument("--no-environment-check", action="store_true",
                     help="skip the check that the library's Lean and Mathlib are the environment's")
     ap.add_argument("--jobs", type=int, default=4, help="files elaborated in parallel (default 4)")
-    ap.add_argument("--work", help="where the plans go (default: <out>/.plan)")
+    ap.add_argument("--work", help="where the plans go (default: plans/<id> under the cache)")
     ap.add_argument("--skeleton", action="store_true",
                     help="also write, under <out>/skeleton/, a draft concept module per module named in "
                          "`restated`: the library's defining commands, renamed and patched, to start from")

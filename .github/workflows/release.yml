@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  github-release:
+    name: Create GitHub release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check that the tag is the tool's version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          v=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' lax_export.py)
+          if [ "v$v" != "$TAG" ]; then
+            echo "::error::Tag $TAG but lax_export.py says $v"
+            exit 1
+          fi
+      - name: Extract release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          v="${VERSION#v}"
+          awk -v h="## [$v]" 'index($0, h) == 1 {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md \
+            | sed '1{/^$/d}' > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::error::No section for $v in CHANGELOG.md"
+            exit 1
+          fi
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" --title "$TAG" --verify-tag --notes-file notes.md
