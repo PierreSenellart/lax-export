@@ -102,7 +102,8 @@ The library and what to export:
 - `requires`: the registered submissions this one builds on, each a mapping
   with `package` (`LaxN`), `repository` (the canonical https URL),
   `commit` (the full 40-character commit the archive registered) and
-  `folder` (the submission folder in that repository). Each becomes a
+  `folder` (the submission folder in that repository, the empty string for a
+  submission at its root). Each becomes a
   `[[require]]` of both packages, pinned exactly as the archive demands,
   and `restated` values may then name declarations of that package in
   full (`Lax904597.Sat.SAT`). With `restated_from`, the path of that

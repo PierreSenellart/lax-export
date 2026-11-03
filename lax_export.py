@@ -2060,7 +2060,7 @@ def main():
     write(os.path.join(args.out, "concepts", f"{cname}.lean"),
           "".join(f"import {m}\n" for m in concept_mods) or "-- the concept modules go in this folder\n")
     required = "".join(f'\n[[require]]\nname = "{r["package"]}"\ngit = "{r["repository"]}"\n'
-                       f'rev = "{r["commit"]}"\nsubDir = "{r["folder"]}/concepts"\n'
+                       f'rev = "{r["commit"]}"\nsubDir = "{os.path.join(r["folder"], "concepts")}"\n'
                        for r in args.requires)
     write(os.path.join(args.out, "concepts", "lakefile.toml"),
           LAKEFILE.format(name=cname, mathlib=MATHLIB_URL, rev=args.mathlib_rev, extra=required))
